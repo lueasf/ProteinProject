@@ -1,2 +1,4 @@
 pandas
 neo4j
+pymongo
+python-dotenv

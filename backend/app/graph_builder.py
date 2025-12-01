@@ -7,6 +7,7 @@ def build_protein_graph(tsv_file, nodes_file="nodes.csv", edges_file="edges.csv"
     df = pd.read_csv(tsv_file, sep="\t", dtype=str)
     df = df.fillna("")
     df['InterPro_list'] = df['InterPro'].apply(lambda x: [d for d in x.split(";") if d] if x else [])
+    df.drop(columns=['InterPro'], inplace=True)
     df_with_domains = df[df['InterPro_list'].map(len) > 0].copy()
 
     domain_to_proteins = defaultdict(set)
@@ -39,9 +40,7 @@ def build_protein_graph(tsv_file, nodes_file="nodes.csv", edges_file="edges.csv"
     print(f"{len(edges_df)} arêtes exportées dans {edges_file}")
 
     df['EC_numbers'] = df['EC number'].apply(lambda x: x.split(";") if x else [])
-    df[['Entry', 'Entry Name', 'Protein names', 'Organism', 'Sequence', 'EC_numbers', 'InterPro_list']].to_csv(
-        nodes_file, index=False
-    )
+    df.to_csv(nodes_file, index=False)
     print(f"{len(df)} nœuds exportés dans {nodes_file}")
 
 if __name__ == "__main__":

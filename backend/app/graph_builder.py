@@ -3,7 +3,7 @@
 import pandas as pd
 from collections import defaultdict
 
-def build_protein_graph(tsv_file, nodes_file="nodes.csv", edges_file="edges.csv"):
+def build_protein_graph(tsv_file, nodes_file="data/processed/nodes.csv", edges_file="data/processed/edges.csv"):
     df = pd.read_csv(tsv_file, sep="\t", dtype=str)
     df = df.fillna("")
     df['InterPro_list'] = df['InterPro'].apply(lambda x: [d for d in x.split(";") if d] if x else [])

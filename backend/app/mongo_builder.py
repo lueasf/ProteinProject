@@ -36,7 +36,8 @@ def process_protein_names(val):
     return clean_names
 
 
-def prepare_mongo_documents(df):
+def prepare_mongo_documents(tsv_path):
+    df = pd.read_csv(tsv_path, sep='\t')
     mongo_docs = []
 
     for index, row in df.iterrows():
@@ -67,10 +68,8 @@ def prepare_mongo_documents(df):
     return mongo_docs
 
 if __name__ == "__main__":
-    df = pd.read_csv('/home/antoine/3A/NoSQL/ProteinProject/uniprot-compressed_true_download_true_fields_accession_2Cid_2Cprotei-2022.11.14-07.52.02.48.tsv', sep='\t')
-
     # Préparation des documents MongoDB
-    mongo_docs = prepare_mongo_documents(df)
+    mongo_docs = prepare_mongo_documents('backend/data/raw/uniprot.tsv')
 
     # Connexion à MongoDB et insertion des documents
     client = MongoClient(MONGO_URI)

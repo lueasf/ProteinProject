@@ -14,21 +14,37 @@ def clear_database(session):
     """Supprime tous les nœuds et relations de la base de données par lots"""
     print("🗑️ Nettoyage de la base de données...")
     
+    # Compter le nombre total de nœuds
+    def count_nodes(tx):
+        result = tx.run("MATCH (n) RETURN count(n) as total")
+        return result.single()["total"]
+    
+    total_nodes = session.execute_read(count_nodes)
+    
+    if total_nodes == 0:
+        print("✅ Base de données déjà vide")
+        return
+    
     # Supprimer par lots pour éviter les problèmes de mémoire
     batch_size = 1000
     deleted = 1
     
-    while deleted > 0:
-        result = session.execute_write(lambda tx: tx.run(
-            """
-            MATCH (n)
-            WITH n LIMIT $limit
-            DETACH DELETE n
-            RETURN count(n) as deleted
-            """,
-            limit=batch_size
-        ))
-        deleted = result.single()["deleted"]
+    with tqdm(total=total_nodes, desc="Suppression des nœuds") as pbar:
+        while deleted > 0:
+            def delete_batch(tx):
+                result = tx.run(
+                    """
+                    MATCH (n)
+                    WITH n LIMIT $limit
+                    DETACH DELETE n
+                    RETURN count(n) as deleted
+                    """,
+                    limit=batch_size
+                )
+                return result.single()["deleted"]
+            
+            deleted = session.execute_write(delete_batch)
+            pbar.update(deleted)
     
     print("✅ Base de données Neo4j nettoyée")
 
@@ -91,7 +107,7 @@ def create_indexes(tx):
     tx.run("CREATE INDEX protein_entry IF NOT EXISTS FOR (p:Protein) ON (p.entry)")
     print("✅ Index créé sur Protein.entry")
 
-def import_edges_optimized(session, edges_csv_path, batch_size=5000):
+def import_edges_optimized(session, edges_csv_path, batch_size=8000):
     """Import des arêtes avec transactions séparées"""
     with open(edges_csv_path, newline='', encoding='utf-8') as csvfile:
         total_rows = sum(1 for _ in csvfile) - 1

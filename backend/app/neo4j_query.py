@@ -10,39 +10,40 @@ driver = GraphDatabase.driver(uri, auth=(user, password))
 
 
 def get_neighbors(entry, limit_k=20, limit_m=10):
-    """
-    Récupère :
-    1. La protéine centrale.
-    2. Ses K meilleurs voisins directs.
-    3. Ses M meilleurs voisins de second niveau.
-    """
-    def query(tx):
-        # NOUVELLE SYNTAXE NEO4J 5+ : CALL (variables) { ... }
+    
+    # 1. La requête complète modifiée pour inclure les poids
+    def query_full(tx):
         result = tx.run(
             """
             MATCH (center:Protein {entry: $entry})
 
-            // Étape 1 : Récupérer les K meilleurs voisins directs (n1)
+            // Étape 1 : Voisins directs (n1) ET leur poids (r1.weight)
             CALL (center) {
                 MATCH (center)-[r1:SIMILAR]-(n1)
                 WITH n1, r1
                 ORDER BY r1.weight DESC
                 LIMIT $limit_k
-                RETURN n1
+                // On renvoie une map contenant les données du nœud et le score
+                RETURN {data: properties(n1), score: r1.weight} AS n1_obj
             }
 
-            // Étape 2 : Pour chaque n1, récupérer ses M meilleurs voisins (n2)
-            CALL (center, n1) {
+            // Étape 2 : Voisins de voisins (n2) ET leur poids (r2.weight)
+            CALL (center, n1_obj) {
+                // On doit retrouver le nœud n1 à partir de ses propriétés ou ID pour continuer
+                // (Note: passer des nodes entiers dans les maps est parfois lourd, ici on fait simple)
+                WITH n1_obj
+                MATCH (n1:Protein {entry: n1_obj.data.entry})
+                
                 MATCH (n1)-[r2:SIMILAR]-(n2)
-                WHERE n2 <> center  // On évite de revenir immédiatement au centre
+                WHERE n2.entry <> center.entry
                 WITH n2, r2
                 ORDER BY r2.weight DESC
                 LIMIT $limit_m
-                RETURN collect(n2) AS n2_list
+                RETURN collect({data: properties(n2), score: r2.weight}) AS n2_list
             }
 
             RETURN center, 
-                   collect(n1) AS neighbors1, 
+                   collect(n1_obj) AS neighbors1, 
                    collect(n2_list) AS neighbors2_grouped
             """,
             entry=entry, limit_k=limit_k, limit_m=limit_m
@@ -52,18 +53,50 @@ def get_neighbors(entry, limit_k=20, limit_m=10):
             return None
 
         center = dict(result["center"])
-        neighbors1 = [dict(n) for n in result["neighbors1"]]
         
-        # Aplatir la liste de listes
+        # Extraction : neighbors1 est maintenant une liste d'objets {data: {}, score: float}
+        neighbors1 = [
+            {"node": res["data"], "score": res["score"]} 
+            for res in result["neighbors1"]
+        ]
+        
+        # Extraction : neighbors2 est une liste de listes d'objets
         neighbors2 = []
         for group in result["neighbors2_grouped"]:
-            for node in group:
-                neighbors2.append(dict(node))
+            for item in group:
+                neighbors2.append({"node": item["data"], "score": item["score"]})
 
         return center, neighbors1, neighbors2
 
+    # 2. La requête de secours (si le nœud est isolé)
+    def query_center_only(tx):
+        result = tx.run(
+            """
+            MATCH (p:Protein {entry: $entry})
+            RETURN p AS center
+            """, 
+            entry=entry
+        ).single()
+        
+        if result is None:
+            return None
+            
+        # On renvoie le centre avec des listes de voisins vides
+        return dict(result["center"]), [], []
+
     with driver.session(database=database_name) as session:
-        return session.execute_read(query)
+        # On tente d'abord la requête complète
+        data = session.execute_read(query_full)
+        
+        # Si la requête complète renvoie des données, c'est parfait
+        if data is not None:
+            return data
+            
+        # Sinon, cela peut vouloir dire 2 choses :
+        # A. La protéine n'existe pas
+        # B. La protéine existe mais n'a pas de voisins (le CALL a échoué)
+        # On vérifie donc si elle existe seule :
+        return session.execute_read(query_center_only)
 
 
 def get_edges(entries):
@@ -93,47 +126,60 @@ def build_subgraph(entry, k=10, m=3):
 
     center, neighbors1, neighbors2 = result
     
-    #print(f"DEBUG: Voisins directs trouvés (k) : {len(neighbors1)}")
-    #print(f"DEBUG: Voisins de voisins bruts (m*k) : {len(neighbors2)}")
-    
-    # --- Déduplication ---
     unique_nodes_map = {}
     
-    unique_nodes_map[center['entry']] = center
+    # 1. Centre (Score = 1.0 ou None)
+    unique_nodes_map[center['entry']] = {
+        "data": center,
+        "group": "center",
+        "score": 1.0
+    }
     
-    for node in neighbors1:
-        unique_nodes_map[node['entry']] = node
+    # 2. Voisins directs
+    for item in neighbors1:
+        node_data = item["node"]
+        score = item["score"]
+        if node_data['entry'] not in unique_nodes_map:
+            unique_nodes_map[node_data['entry']] = {
+                "data": node_data,
+                "group": "level1",
+                "score": score  # On stocke le score ici
+            }
         
-    count_new_nodes = 0
-    for node in neighbors2:
-        # Si le nœud n'est PAS déjà dans la map (donc pas centre, et pas voisin direct)
-        if node['entry'] not in unique_nodes_map:
-            unique_nodes_map[node['entry']] = node
-            count_new_nodes += 1
+    # 3. Voisins de voisins
+    for item in neighbors2:
+        node_data = item["node"]
+        score = item["score"]
+        if node_data['entry'] not in unique_nodes_map:
+            unique_nodes_map[node_data['entry']] = {
+                "data": node_data,
+                "group": "level2",
+                "score": score
+            }
 
-    #print(f"DEBUG: Voisins de voisins réellement nouveaux ajoutés : {count_new_nodes}")
-
+    # Construction de la liste
     nodes = []
-    for entry_id, node in unique_nodes_map.items():
-        group = "neighbor"
-        if entry_id == center["entry"]:
-            group = "center"
+    for entry_id, info in unique_nodes_map.items():
+        node_data = info["data"]
         
         nodes.append({
-            "id": node["entry"],
-            "entry": node["entry"],
-            "entry_name": node.get("entry_name", ""),
-            # "protein_names": node.get("protein_names", ""), # Commenté pour alléger l'affichage console
-            "group": group
+            "id": node_data.get("entry", ""),
+            "entry": node_data.get("entry", ""),
+            "entry_name": node_data.get("entry_name", ""),
+            "protein_names": node_data.get("protein_names", []),
+            "organism": node_data.get("organism", ""),
+            "sequence": node_data.get("sequence", ""),
+            "ec_numbers": node_data.get("ec_numbers", []),
+            "interpro_list": node_data.get("interpro_list", []),
+            "group": info["group"],
+            "similarity": info["score"]  # Ajouté au JSON final
         })
 
     edges = get_edges([n["entry"] for n in nodes])
-
     return {"nodes": nodes, "edges": edges}
 
 
 if __name__ == "__main__":
-    # ESSAIE AVEC k=5, m=5 POUR VOIR
     test_entry = "A0A087X1C5" 
     print(f"--- Lancement pour {test_entry} ---")
     data = build_subgraph(test_entry, k=5, m=5)

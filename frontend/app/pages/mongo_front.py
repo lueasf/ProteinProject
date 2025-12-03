@@ -17,8 +17,9 @@ except Exception:
     AGRAPH_AVAILABLE = False
 
 @st.cache_data(show_spinner=False)
-def cached_subgraph(entry_for_graph: str):
-    return build_subgraph(entry_for_graph)
+def cached_subgraph(entry_for_graph: str, k: int, m: int):
+    # On passe les paramètres au backend
+    return build_subgraph(entry_for_graph, k=k, m=m)
 
 # Configuration de la page
 st.set_page_config(
@@ -394,55 +395,168 @@ def display_results(results_data):
                         st.rerun()
 
                 if st.session_state[graph_key]:
+                    st.markdown("---")
+                    
+                    # --- PARAMÈTRES DU GRAPHE ---
+                    # On permet à l'utilisateur de régler la densité
+                    c_param1, c_param2, c_legend = st.columns([1, 1, 2])
+                    with c_param1:
+                        k_val = st.slider(f"Voisins directs (k) - {entry_for_graph}", 1, 20, 5, key=f"k_{entry_for_graph}")
+                    with c_param2:
+                        m_val = st.slider(f"Voisins niv.2 (m) - {entry_for_graph}", 0, 10, 2, key=f"m_{entry_for_graph}")
+                    with c_legend:
+                        st.info(
+                            "🔴 **Rouge** : Protéine Cible\n\n"
+                            "🔵 **Bleu** : Voisins directs (Niveau 1)\n\n"
+                            "🟢 **Vert** : Voisins de voisins (Niveau 2)"
+                        )
+
                     with st.spinner("Construction du graphe..."):
                         try:
-                            subgraph = cached_subgraph(entry_for_graph)
+                            # Appel avec les paramètres dynamiques
+                            subgraph = cached_subgraph(entry_for_graph, k=k_val, m=m_val)
                         except Exception as e:
                             subgraph = None
                             st.error(f"Erreur Neo4j: {e}")
 
-                    if not subgraph or not subgraph.get("nodes"):
-                        st.info("Graphe indisponible pour cette protéine.")
+                    if not subgraph:
+                        st.warning("Cette protéine n'a pas été trouvée dans la base de données Neo4j.")
+                    
                     else:
+                        nodes_list = subgraph.get("nodes", [])
+                        edges_list = subgraph.get("edges", [])
+                        
+                        # Détection : est-ce un nœud isolé ?
+                        is_isolated = len(nodes_list) == 1
+                        
+                        # Affichage du message si isolé
+                        if is_isolated:
+                            st.info("⚠️ **Nœud isolé** : Cette protéine ne possède pas de voisins similaires (arêtes) avec les paramètres actuels.")
                         nodes = []
-                        for n in subgraph["nodes"]:
-                            is_center = (n.get("group") == "center")
-                            label = n.get("entry_name") or n.get("entry") or "node"
+                        for n in nodes_list:
+                            # --- NOUVELLE LOGIQUE DE COULEURS ---
+                            # On se base strictement sur le groupe renvoyé par le backend
+                            similarity = n.get("similarity", 0)
+                            group = n.get("group", "neighbor")
+
+                            # Formatage du score en pourcentage (ex: 0.954 -> 95.4%)
+                            if group == "center":
+                                score_display = "REF (100%)"
+                            elif similarity:
+                                score_display = f"{similarity:.1%}" # Formatage Python auto
+                            else:
+                                score_display = "N/A"
+                            
+                            if group == "center":
+                                color = "#ff4b4b"  # Rouge (Streamlit primary)
+                                size = 35
+                                label_node = n.get("entry")  # Label visible
+                            elif group == "level1":
+                                color = "#1c83e1"  # Bleu vif
+                                size = 25
+                                label_node = n.get("entry")
+                            elif group == "level2":
+                                color = "#09ab3b"  # Vert
+                                size = 15
+                                # Pour le niveau 2, on peut cacher le label pour alléger si on veut
+                                label_node = n.get("entry") 
+                            else:
+                                color = "#adb5bd" # Gris par défaut
+                                size = 10
+                                label_node = ""
+
+                            # Construction du tooltip
                             entry = n.get("entry", "")
-                            pn = n.get("protein_names", "")
-                            org = n.get("organism", "")
-                            ec = n.get("ec_numbers", [])
-                            ipr = n.get("interpro_list", [])
-                            title = f"{entry}\n{pn}\nOrganism: {org}\nEC: {', '.join(ec) if isinstance(ec, list) else ec}\nInterPro: {', '.join(ipr[:5]) if isinstance(ipr, list) else ipr}"
+                            entry_name = n.get("entry_name", "")
+                            organism = n.get("organism", "")
+                            protein_names = n.get("protein_names", [])
+                            ec_numbers = n.get("ec_numbers", [])
+                            interpro_list = n.get("interpro_list", [])
+                            
+                            # Gestion propre des listes pour l'affichage
+                            if isinstance(protein_names, list):
+                                p_names_str = "; ".join(protein_names[:2]) # On n'en montre que 2
+                            else:
+                                p_names_str = str(protein_names)
+                                
+                            title = (
+                                f"[{group.upper()}] - Sim: {score_display}\n" 
+                                f"-----------------------------\n"
+                                f"ID: {entry}\n"
+                                f"Name: {entry_name}\n"
+                                f"Org: {organism}\n"
+                                f"Desc: {p_names_str[:100]}..."
+                                f"\nEC: {', '.join(ec_numbers) if isinstance(ec_numbers, list) else ec_numbers}"
+                                f"\nInterPro: {', '.join(interpro_list) if isinstance(interpro_list, list) else interpro_list}"
+                            )
+
                             nodes.append(
                                 Node(
                                     id=entry,
-                                    label=label,
-                                    size=30 if is_center else 16,
+                                    label=label_node,
+                                    size=size,
                                     title=title,
-                                    color="#ff6b6b" if is_center else "#4dabf7",
-                                    shape="dot"
+                                    color=color,
+                                    shape="dot",
+                                    borderWidth=2,
+                                    borderWidthSelected=4,
                                 )
                             )
-                        edges = []
-                        for e in subgraph["edges"]:
-                            w = e.get("weight", "")
-                            w_label = f"{w:.3f}" if isinstance(w, (int, float)) else str(w) if w is not None else ""
-                            edges.append(Edge(source=e["source"], target=e["target"], label=w_label))
 
+                        edges = []
+                        for e in edges_list:
+                            # Récupération du poids (de 0 à 1)
+                            weight = e.get("weight", 0)
+                            
+                            # Sécurité : on s'assure que le poids est entre 0 et 1
+                            weight = max(0, min(1, weight))
+                            
+                            # --- CALCUL DE LA DISTANCE PHYSIQUE ---
+                            # Distance basée sur la dissimilarité (1 - weight)
+                            # weight = 0.99 -> length = 150 + (0.01 * 400) = 154px
+                            # weight = 0.50 -> length = 150 + (0.50 * 400) = 350px
+                            # weight = 0.10 -> length = 150 + (0.90 * 400) = 510px
+                            edge_length = 150 + (1 - weight) * 400
+                            
+                            # --- CALCUL DE L'ÉPAISSEUR VISUELLE ---
+                            # Arêtes fines : de 0.3px à 2px
+                            edge_width = 0.3 + (weight * 1.7)
+                            
+                            edge_color = "#d3d3d3"
+                            
+                            edges.append(Edge(
+                                source=e["source"], 
+                                target=e["target"],
+                                color=edge_color,
+                                width=edge_width,
+                                length=edge_length
+                            ))
+                        
                         config = Config(
-                            width=900,
-                            height=500,
+                            width=1000,
+                            height=600,
                             directed=False,
                             physics=True,
                             hierarchical=False,
-                            nodeHighlightBehavior=True,
-                            highlightColor="#F7A7A6",
+                            physicsOptions={
+                                "barnesHut": {
+                                    "gravitationalConstant": -3000,  # Augmenté pour plus de répulsion
+                                    "centralGravity": 0.2,           # Réduit pour moins attirer au centre
+                                    "springConstant": 0.08,          # Augmenté pour mieux respecter edge_length
+                                    "springLength": 200,             # Distance de repos des ressorts
+                                    "damping": 0.15,                 # Augmenté pour stabiliser plus vite
+                                    "avoidOverlap": 0.8              # Augmenté pour éviter les chevauchements
+                                },
+                                "stabilization": {
+                                    "enabled": True,
+                                    "iterations": 200                # Plus d'itérations pour converger
+                                }
+                            }
                         )
-                        # Centrage visuel
-                        left, center, right = st.columns([1, 6, 1])
-                        with center:
-                            agraph(nodes=nodes, edges=edges, config=config)  # suppression de key=...
+                        
+                        left, center_col, right = st.columns([1, 10, 1])
+                        with center_col:
+                            agraph(nodes=nodes, edges=edges, config=config) # Pas de key=agraph_key ici parfois ça bug avec agraph, test sans d'abord
 
     # Pagination
     st.markdown("---")

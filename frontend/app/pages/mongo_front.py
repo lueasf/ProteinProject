@@ -6,6 +6,19 @@ from streamlit_searchbox import st_searchbox
 # Ajouter le chemin du backend pour importer mongo_queries
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'backend', 'app'))
 from mongo_queries import ProteinDatabase
+# --- AJOUT: import du graphe Neo4j ---
+from neo4j_query import build_subgraph
+
+# --- AJOUT: visualisation de graphe ---
+try:
+    from streamlit_agraph import agraph, Node, Edge, Config
+    AGRAPH_AVAILABLE = True
+except Exception:
+    AGRAPH_AVAILABLE = False
+
+@st.cache_data(show_spinner=False)
+def cached_subgraph(entry_for_graph: str):
+    return build_subgraph(entry_for_graph)
 
 # Configuration de la page
 st.set_page_config(
@@ -315,26 +328,40 @@ def display_results(results_data):
     
     # Affichage sous forme de tableau
     for idx, protein in enumerate(results):
-        with st.expander(f"🧬 **{protein.get('entry_name', 'N/A')}** - {protein.get('protein_names', 'N/A')[:80]}...", expanded=False):
+        # Identifiant stable par résultat
+        entry_for_graph = protein.get('_id') or str(idx)
+        expander_key = f"exp_open_{entry_for_graph}"
+        graph_key = f"graph_open_{entry_for_graph}"
+
+        # États par défaut
+        if expander_key not in st.session_state:
+            st.session_state[expander_key] = False
+        if graph_key not in st.session_state:
+            st.session_state[graph_key] = False
+
+        label = f"🧬 **{protein.get('entry_name', 'N/A')}** - {protein.get('protein_names', 'N/A')[:80]}..."
+        with st.expander(label, expanded=st.session_state[expander_key]):
+            # Forcer l’expander à rester ouvert si le graphe est affiché
+            if st.session_state[graph_key] and not st.session_state[expander_key]:
+                st.session_state[expander_key] = True
+                st.rerun()  # remplace st.experimental_rerun
+
             col1, col2 = st.columns(2)
-            
             with col1:
                 st.markdown("**Informations générales**")
                 st.write(f"**ID:** `{protein.get('_id', 'N/A')}`")
                 st.write(f"**Entry Name:** {protein.get('entry_name', 'N/A')}")
                 st.write(f"**Organisme:** {protein.get('organism', 'N/A')}")
                 st.write(f"**Longueur:** {protein.get('sequence_length', 'N/A')} aa")
-            
+
             with col2:
                 st.markdown("**Annotations**")
                 annotations = protein.get('annotations', {})
-                
                 ec_numbers = annotations.get('ec_numbers', [])
                 if ec_numbers:
                     st.write(f"**EC Numbers:** {', '.join(ec_numbers) if isinstance(ec_numbers, list) else ec_numbers}")
                 else:
                     st.write("**EC Numbers:** Aucun")
-                
                 interpro_ids = annotations.get('interpro', [])
                 if interpro_ids:
                     if isinstance(interpro_ids, list):
@@ -343,11 +370,80 @@ def display_results(results_data):
                         st.write(f"**InterPro:** {interpro_ids}")
                 else:
                     st.write("**InterPro:** Aucun")
-            
-            # Nom complet de la protéine
+
             st.markdown("**Nom complet de la protéine:**")
             st.info(protein.get('protein_names', 'N/A'))
-    
+
+            # --- Graphe Neo4j (lazy, état persistant) ---
+            st.markdown("**Graphe de similarité (Neo4j)**")
+            if not AGRAPH_AVAILABLE:
+                st.warning("La visualisation nécessite 'streamlit-agraph'. Installez-le avec: pip install streamlit-agraph")
+            else:
+                # Bouton qui ne fait que basculer l’état puis rerun
+                if not st.session_state[graph_key]:
+                    if st.button("Afficher le graphe", key=f"btn_show_graph_{entry_for_graph}"):
+
+                        st.session_state[graph_key] = True
+                        st.session_state[expander_key] = True
+                        st.rerun()
+                else:
+                    if st.button("Masquer le graphe", key=f"btn_hide_graph_{entry_for_graph}"):
+
+                        st.session_state[graph_key] = False
+                        # On laisse l’expander ouvert par choix UX; sinon mettre False
+                        st.rerun()
+
+                if st.session_state[graph_key]:
+                    with st.spinner("Construction du graphe..."):
+                        try:
+                            subgraph = cached_subgraph(entry_for_graph)
+                        except Exception as e:
+                            subgraph = None
+                            st.error(f"Erreur Neo4j: {e}")
+
+                    if not subgraph or not subgraph.get("nodes"):
+                        st.info("Graphe indisponible pour cette protéine.")
+                    else:
+                        nodes = []
+                        for n in subgraph["nodes"]:
+                            is_center = (n.get("group") == "center")
+                            label = n.get("entry_name") or n.get("entry") or "node"
+                            entry = n.get("entry", "")
+                            pn = n.get("protein_names", "")
+                            org = n.get("organism", "")
+                            ec = n.get("ec_numbers", [])
+                            ipr = n.get("interpro_list", [])
+                            title = f"{entry}\n{pn}\nOrganism: {org}\nEC: {', '.join(ec) if isinstance(ec, list) else ec}\nInterPro: {', '.join(ipr[:5]) if isinstance(ipr, list) else ipr}"
+                            nodes.append(
+                                Node(
+                                    id=entry,
+                                    label=label,
+                                    size=30 if is_center else 16,
+                                    title=title,
+                                    color="#ff6b6b" if is_center else "#4dabf7",
+                                    shape="dot"
+                                )
+                            )
+                        edges = []
+                        for e in subgraph["edges"]:
+                            w = e.get("weight", "")
+                            w_label = f"{w:.3f}" if isinstance(w, (int, float)) else str(w) if w is not None else ""
+                            edges.append(Edge(source=e["source"], target=e["target"], label=w_label))
+
+                        config = Config(
+                            width=900,
+                            height=500,
+                            directed=False,
+                            physics=True,
+                            hierarchical=False,
+                            nodeHighlightBehavior=True,
+                            highlightColor="#F7A7A6",
+                        )
+                        # Centrage visuel
+                        left, center, right = st.columns([1, 6, 1])
+                        with center:
+                            agraph(nodes=nodes, edges=edges, config=config)  # suppression de key=...
+
     # Pagination
     st.markdown("---")
     total_pages = max(1, (total + per_page - 1) // per_page)

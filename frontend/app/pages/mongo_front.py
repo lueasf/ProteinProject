@@ -635,6 +635,98 @@ except Exception as e:
     st.error(f"❌ Erreur de connexion à la base de données: {e}")
     st.info("Vérifiez que MongoDB est en cours d'exécution et que les variables d'environnement sont configurées.")
 
+
+import plotly.express as px
+from stats import compute_protein_stats  # nouveau
+@st.cache_data(show_spinner=False)
+def get_global_protein_stats():
+    """
+    Wrap de compute_protein_stats() avec cache Streamlit,
+    pour éviter de relire les gros CSV à chaque interaction.
+    """
+    return compute_protein_stats()
+
+
+# ==============================
+# Statistiques globales (CSV)
+# ==============================
+with st.expander("📈 Statistiques globales (nodes.csv / edges.csv)", expanded=False):
+    try:
+        stats = get_global_protein_stats()
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total de protéines", stats["total_proteins"])
+        with col2:
+            st.metric("Labellisées (EC)", stats["labelled_proteins"])
+            st.metric(
+                "Ratio labellées (%)",
+                f"{stats['labelled_ratio']:.1f}"
+            )
+        with col3:
+            st.metric("Isolées", stats["isolated_proteins"])
+            st.metric(
+                "Ratio isolées (%)",
+                f"{stats['isolated_ratio']:.1f}"
+            )
+
+        st.markdown("### Répartitions")
+
+        # ========= Camembert 1 : Labellisées vs non labellisées =========
+        labels_1 = ["Labellisées", "Non labellisées"]
+        values_1 = [
+            stats["labelled_proteins"],
+            stats["unlabelled_proteins"],
+        ]
+
+        fig1 = px.pie(
+            names=labels_1,
+            values=values_1,
+            hole=0.3,
+            title="Labellisées vs non labellisées",
+        )
+        fig1.update_traces(
+            textposition="inside",
+            textinfo="percent+label"
+        )
+        fig1.update_layout(
+            margin=dict(t=40, b=10, l=10, r=10),
+            showlegend=False,
+        )
+
+        non_isolated = stats["total_proteins"] - stats["isolated_proteins"]
+        labels_2 = ["Isolées", "Non isolées"]
+        values_2 = [
+            stats["isolated_proteins"],
+            non_isolated,
+        ]
+
+        fig2 = px.pie(
+            names=labels_2,
+            values=values_2,
+            hole=0.3,
+            title="Isolées vs non isolées",
+        )
+        fig2.update_traces(
+            textposition="inside",
+            textinfo="percent+label"
+        )
+        fig2.update_layout(
+            margin=dict(t=40, b=10, l=10, r=10),
+            showlegend=False,
+        )
+
+        # Affichage côte à côte
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(fig1, use_container_width=True)
+        with c2:
+            st.plotly_chart(fig2, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Erreur lors du calcul des statistiques globales : {e}")
+
+
 # Footer
 st.markdown("---")
 st.markdown(

@@ -1,11 +1,7 @@
-import pymongo
 from pymongo import MongoClient
-import sys
-import datetime 
 import os
 import dotenv
 import pandas as pd
-import numpy as np
 import re
 
 dotenv.load_dotenv()
@@ -67,7 +63,9 @@ def prepare_mongo_documents(df):
     return mongo_docs
 
 if __name__ == "__main__":
-    df = pd.read_csv('/home/antoine/3A/NoSQL/ProteinProject/uniprot-compressed_true_download_true_fields_accession_2Cid_2Cprotei-2022.11.14-07.52.02.48.tsv', sep='\t')
+    tsv_path = os.path.join('backend', 'data', 'raw', 'uniprot.tsv')
+    
+    df = pd.read_csv(tsv_path, sep='\t')
 
     # Préparation des documents MongoDB
     mongo_docs = prepare_mongo_documents(df)

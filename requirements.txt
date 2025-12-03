@@ -3,3 +3,5 @@ neo4j
 pymongo
 python-dotenv
 tqdm
+streamlit
+streamlit-searchbox

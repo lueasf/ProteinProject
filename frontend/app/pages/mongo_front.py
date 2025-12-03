@@ -1,7 +1,6 @@
 import streamlit as st
 import sys
 import os
-import pandas as pd
 from streamlit_searchbox import st_searchbox
 
 # Ajouter le chemin du backend pour importer mongo_queries

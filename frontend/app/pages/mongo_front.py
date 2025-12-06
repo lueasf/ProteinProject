@@ -9,6 +9,8 @@ from mongo_queries import ProteinDatabase
 # --- AJOUT: import du graphe Neo4j ---
 from neo4j_query import build_subgraph
 
+from delete_protein import delete_protein
+
 # --- AJOUT: visualisation de graphe ---
 try:
     from streamlit_agraph import agraph, Node, Edge, Config
@@ -70,6 +72,12 @@ if 'interpro_groups' not in st.session_state:
     st.session_state.interpro_groups = ['']  # Liste des groupes InterPro
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 1
+
+# États pour la suppression de protéines
+if 'delete_message' not in st.session_state:
+    st.session_state.delete_message = None  # {"type": "success"|"error", "text": "..."}
+if 'confirm_delete' not in st.session_state:
+    st.session_state.confirm_delete = None  # {"id": "...", "name": "..."} ou None
 
 # Fonctions pour gérer les champs dynamiques
 def add_ec_group():
@@ -323,6 +331,54 @@ def display_results(results_data):
     
     st.markdown("---")
     
+    # ======== MESSAGE DE SUPPRESSION ========
+    if st.session_state.delete_message:
+        msg = st.session_state.delete_message
+        col_msg, col_close = st.columns([10, 1])
+        with col_msg:
+            if msg["type"] == "success":
+                st.success(msg["text"])
+            else:
+                st.error(msg["text"])
+        with col_close:
+            if st.button("✖", key="close_delete_msg", help="Fermer"):
+                st.session_state.delete_message = None
+                st.rerun()
+        st.markdown("---")
+    
+    # ======== MODAL DE CONFIRMATION ========
+    if st.session_state.confirm_delete:
+        protein_id = st.session_state.confirm_delete["id"]
+        protein_name = st.session_state.confirm_delete["name"]
+        
+        st.warning(f"⚠️ **Confirmation de suppression**")
+        st.markdown(f"Êtes-vous sûr de vouloir supprimer la protéine **`{protein_name}`** (ID: `{protein_id}`) ?")
+        st.markdown("Cette action est **irréversible** et supprimera la protéine de MongoDB et Neo4j.")
+        
+        col_confirm, col_cancel = st.columns(2)
+        with col_confirm:
+            if st.button("✅ Oui, supprimer", key="confirm_delete_btn", type="primary"):
+                # Effectuer la suppression
+                delete_result = delete_protein(protein_id)
+                if delete_result["mongodb"]["deleted"] or delete_result["neo4j"]["deleted"]:
+                    st.session_state.delete_message = {
+                        "type": "success",
+                        "text": f"✅ Protéine `{protein_name}` supprimée avec succès."
+                    }
+                else:
+                    st.session_state.delete_message = {
+                        "type": "error",
+                        "text": f"❌ Échec de la suppression de la protéine `{protein_name}`."
+                    }
+                st.session_state.confirm_delete = None
+                st.rerun()
+        with col_cancel:
+            if st.button("❌ Annuler", key="cancel_delete_btn"):
+                st.session_state.confirm_delete = None
+                st.rerun()
+        
+        st.markdown("---")
+    
     if not results:
         st.warning("Aucun résultat trouvé. Essayez de modifier vos critères de recherche.")
         return
@@ -371,6 +427,14 @@ def display_results(results_data):
                         st.write(f"**InterPro:** {interpro_ids}")
                 else:
                     st.write("**InterPro:** Aucun")
+                
+                # Bouton pour demander confirmation de suppression
+                if st.button("Supprimer cette protéine", key=f"delete_btn_{entry_for_graph}", type="primary"):
+                    st.session_state.confirm_delete = {
+                        "id": protein.get('_id'),
+                        "name": protein.get('entry_name', 'N/A')
+                    }
+                    st.rerun()
 
             st.markdown("**Nom complet de la protéine:**")
             st.info(protein.get('protein_names', 'N/A'))

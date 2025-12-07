@@ -2,6 +2,7 @@ from neo4j import GraphDatabase
 import csv
 from tqdm import tqdm
 import os
+import ast  # Pour parser les listes dans le CSV
 
 # Connexion à Neo4j
 uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
@@ -57,14 +58,25 @@ def import_nodes_optimized(session, nodes_csv_path, batch_size=500):
         batch = []
         
         for row in tqdm(reader, total=total_rows, desc="Import des nœuds"):
+            # Parser les listes depuis le CSV
+            try:
+                interpro_list = ast.literal_eval(row['InterPro_list']) if row['InterPro_list'] else []
+            except:
+                interpro_list = row['InterPro_list'].split(';') if row['InterPro_list'] else []
+            
+            try:
+                ec_numbers = ast.literal_eval(row['EC_numbers']) if row['EC_numbers'] else []
+            except:
+                ec_numbers = row['EC_numbers'].split(';') if row['EC_numbers'] else []
+            
             batch.append({
                 'entry': row['Entry'],
                 'entry_name': row['Entry Name'],
                 'protein_names': row['Protein names'].split(';') if row['Protein names'] else [],
                 'organism': row.get('Organism', ''),
                 'sequence': row['Sequence'],
-                'ec_numbers': row['EC_numbers'].split(';') if row['EC_numbers'] else [],
-                'interpro_list': row['InterPro_list'].split(';') if row['InterPro_list'] else []
+                'ec_numbers': ec_numbers,
+                'interpro_list': interpro_list
             })
             
             if len(batch) >= batch_size:

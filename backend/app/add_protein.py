@@ -99,20 +99,23 @@ def add_protein_to_neo4j(protein_data):
     Ajoute une protéine à Neo4j et crée les relations SIMILAR avec les protéines
     partageant des domaines InterPro.
     """
-    driver = None
     try:
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
         
+        # Préparer les données pour Neo4j
+        entry = protein_data.get("entry")
+        entry_name = protein_data.get("entry_name", "")
+        protein_names = process_protein_names(protein_data.get("protein_names", ""))
+        organism = protein_data.get("organism", "")
+        sequence = protein_data.get("sequence", "")
+        ec_numbers = split_string_to_list(protein_data.get("ec_numbers", ""))
+        interpro_list = split_string_to_list(protein_data.get("interpro", ""))
+        
+        relations = []
+        similar_count = 0
+        
         with driver.session(database=NEO4J_DATABASE) as session:
-            entry = protein_data.get("entry")
-            entry_name = protein_data.get("entry_name", "")
-            protein_names = process_protein_names(protein_data.get("protein_names", ""))
-            organism = protein_data.get("organism", "")
-            sequence = protein_data.get("sequence", "")
-            ec_numbers = split_string_to_list(protein_data.get("ec_numbers", ""))
-            interpro_list = split_string_to_list(protein_data.get("interpro", ""))
-            
-            # 1. Créer ou mettre à jour le nœud Protein
+            # 1. Créer ou mettre à jour le nœud de la protéine
             def create_protein_node(tx):
                 tx.run(
                     """
@@ -134,105 +137,52 @@ def add_protein_to_neo4j(protein_data):
                 )
             
             session.execute_write(create_protein_node)
-            print(f"✅ Nœud Protein {entry} créé/mis à jour dans Neo4j")
+            print(f"✅ Protéine {entry} ajoutée à Neo4j")
             
-            # 2. Si pas de domaines InterPro, pas de relations SIMILAR
-            if not interpro_list:
-                print(f"ℹ️ Pas de domaines InterPro pour {entry}, aucune relation SIMILAR créée")
-                return (0, [])
-            
-            # 3. Trouver les protéines avec des domaines InterPro en commun
-            def find_similar_proteins(tx):
-                result = tx.run(
-                    """
-                    MATCH (other:Protein)
-                    WHERE other.entry <> $entry
-                      AND other.interpro_list IS NOT NULL
-                      AND (
-                          // Cas 1: interpro_list est une vraie liste Neo4j
-                          (other.interpro_list[0] IS NOT NULL 
-                           AND size([d IN other.interpro_list WHERE d IN $interpro_list]) > 0)
-                          OR
-                          // Cas 2: interpro_list est une string (anciennes données)
-                          (other.interpro_list[0] IS NULL 
-                           AND ANY(domain IN $interpro_list WHERE other.interpro_list CONTAINS domain))
-                      )
-                    RETURN other.entry AS other_entry,
-                           other.interpro_list AS other_interpro
-                    """,
-                    entry=entry,
-                    interpro_list=interpro_list
-                )
-                return [(record["other_entry"], record["other_interpro"]) for record in result]
-            
-            similar_proteins = session.execute_read(find_similar_proteins)
-            
-            if not similar_proteins:
-                print(f"ℹ️ Aucune protéine similaire trouvée pour {entry}")
-                return (0, [])
-            
-            # 4. Calculer les poids et créer les relations SIMILAR
-            relations_created = []
-            
-            def create_similar_relation(tx, other_entry, weight):
-                # Supprimer d'abord les relations existantes entre ces deux protéines
-                tx.run(
-                    """
-                    MATCH (p1:Protein {entry: $entry})-[r:SIMILAR]-(p2:Protein {entry: $other_entry})
-                    DELETE r
-                    """,
-                    entry=entry,
-                    other_entry=other_entry
-                )
-                # Créer la nouvelle relation bidirectionnelle (une seule arête)
-                tx.run(
-                    """
-                    MATCH (p1:Protein {entry: $entry})
-                    MATCH (p2:Protein {entry: $other_entry})
-                    CREATE (p1)-[:SIMILAR {weight: $weight}]->(p2)
-                    """,
-                    entry=entry,
-                    other_entry=other_entry,
-                    weight=weight
-                )
-            
-            for other_entry, other_interpro in similar_proteins:
-                # Gérer le cas où other_interpro est une string (anciennes données)
-                if isinstance(other_interpro, str):
-                    # Parser la string "['IPR001', 'IPR002']" en liste
-                    try:
-                        other_interpro_list = ast.literal_eval(other_interpro)
-                    except:
-                        # Fallback: extraire les IPR avec regex
-                        other_interpro_list = re.findall(r'IPR\d+', other_interpro)
-                else:
-                    other_interpro_list = other_interpro if other_interpro else []
+            # 2. Créer les relations SIMILAR avec les protéines partageant des domaines InterPro
+            if interpro_list:
+                def create_similar_relations(tx):
+                    result = tx.run(
+                        """
+                        MATCH (p1:Protein {entry: $entry})
+                        MATCH (p2:Protein)
+                        WHERE p2.entry <> $entry 
+                          AND SIZE(p2.interpro_list) > 0
+                          AND any(domain IN p1.interpro_list WHERE domain IN p2.interpro_list)
+                        WITH p1, p2, 
+                             [domain IN p1.interpro_list WHERE domain IN p2.interpro_list] AS shared_domains
+                        WITH p1, p2, shared_domains,
+                             toFloat(SIZE(shared_domains)) / 
+                             toFloat(SIZE(p1.interpro_list) + SIZE(p2.interpro_list) - SIZE(shared_domains)) AS jaccard_similarity
+                        MERGE (p1)-[r:SIMILAR]-(p2)
+                        SET r.weight = jaccard_similarity
+                        RETURN p2.entry AS target, jaccard_similarity AS weight
+                        """,
+                        entry=entry
+                    )
+                    return list(result)
                 
-                # Calcul du poids Jaccard: intersection / union
-                set_new = set(interpro_list)
-                set_other = set(other_interpro_list)
+                similar_proteins = session.execute_write(create_similar_relations)
+                similar_count = len(similar_proteins)
                 
-                intersection = len(set_new & set_other)
-                union = len(set_new | set_other)
-                weight = intersection / union if union > 0 else 0
+                # Construire la liste des relations pour le retour
+                for record in similar_proteins:
+                    relations.append({
+                        "source": entry,
+                        "target": record["target"],
+                        "weight": record["weight"]
+                    })
                 
-                session.execute_write(create_similar_relation, other_entry, weight)
-                relations_created.append({
-                    "source": entry,
-                    "target": other_entry,
-                    "weight": weight,
-                    "shared_domains": list(set_new & set_other)
-                })
-            
-            print(f"✅ {len(relations_created)} relations SIMILAR créées pour {entry}")
-            return (len(relations_created), relations_created)
-            
+                print(f"✅ {similar_count} relations SIMILAR créées pour {entry}")
+            else:
+                print(f"⚠️  Aucun domaine InterPro pour {entry}, aucune relation créée")
+        
+        driver.close()
+        return similar_count, relations
+        
     except Exception as e:
         print(f"❌ Erreur Neo4j: {e}")
-        return (0, [])
-    finally:
-        if driver:
-            driver.close()
+        return -1, []
 
 
 def add_protein(protein_data):

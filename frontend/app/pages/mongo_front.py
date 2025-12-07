@@ -10,6 +10,7 @@ from mongo_queries import ProteinDatabase
 from neo4j_query import build_subgraph
 
 from delete_protein import delete_protein
+from add_protein import add_protein
 
 # --- AJOUT: visualisation de graphe ---
 try:
@@ -79,6 +80,12 @@ if 'delete_message' not in st.session_state:
 if 'confirm_delete' not in st.session_state:
     st.session_state.confirm_delete = None  # {"id": "...", "name": "..."} ou None
 
+# États pour l'ajout de protéines
+if 'show_add_protein_modal' not in st.session_state:
+    st.session_state.show_add_protein_modal = False
+if 'add_protein_message' not in st.session_state:
+    st.session_state.add_protein_message = None  # {"type": "success"|"error", "text": "..."}
+
 # Fonctions pour gérer les champs dynamiques
 def add_ec_group():
     st.session_state.ec_groups.append('')
@@ -93,11 +100,6 @@ def add_interpro_group():
 def remove_interpro_group(index):
     if len(st.session_state.interpro_groups) > 1:
         st.session_state.interpro_groups.pop(index)
-
-def reset_all():
-    st.session_state.ec_groups = ['']
-    st.session_state.interpro_groups = ['']
-    st.session_state.current_page = 1
 
 # Titre principal
 st.title("🧬 Recherche de Protéines")
@@ -133,6 +135,124 @@ selected_protein = st_searchbox(
     clear_on_submit=False,
     default=None,
 )
+
+if st.button("Ajouter une protéine", key="add_protein_btn"):
+    st.session_state.show_add_protein_modal = True
+    st.rerun()
+
+# ======== MODAL D'AJOUT DE PROTÉINE ========
+if st.session_state.show_add_protein_modal:
+    st.markdown("### ➕ Ajouter une nouvelle protéine")
+    st.markdown("---")
+    
+    with st.form("add_protein_form"):
+        st.markdown("**Informations obligatoires**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            new_entry = st.text_input(
+                "ID de la protéine (Entry)*",
+                placeholder="Ex: P12345",
+                help="Identifiant unique de la protéine (requis)"
+            )
+            new_entry_name = st.text_input(
+                "Entry Name*",
+                placeholder="Ex: SRD_HUMAN",
+                help="Nom d'entrée de la protéine (requis)"
+            )
+        
+        with col2:
+            new_organism = st.text_input(
+                "Organisme*",
+                placeholder="Ex: Homo sapiens (Human)",
+                help="Organisme source (requis)"
+            )
+        
+        new_protein_names = st.text_area(
+            "Noms de la protéine*",
+            placeholder="Ex: Cytochrome b (Cyt b)",
+            help="Noms de la protéine, séparés par des points-virgules si plusieurs",
+            height=80
+        )
+        
+        new_sequence = st.text_area(
+            "Séquence*",
+            placeholder="Ex: MGDVEKGKKILMEYLENPKKYIPGTKMIFVGIKKKEERADLIAYLKKATNE",
+            help="Séquence d'acides aminés (requis)",
+            height=100
+        )
+        
+        st.markdown("**Annotations (optionnelles)**")
+        
+        col3, col4 = st.columns(2)
+        with col3:
+            new_ec_numbers = st.text_input(
+                "Numéros EC",
+                placeholder="Ex: 1.14.14.1;4.2.1.152",
+                help="Numéros EC séparés par des points-virgules"
+            )
+        
+        with col4:
+            new_interpro = st.text_input(
+                "Domaines InterPro",
+                placeholder="Ex: IPR001349;IPR002327",
+                help="Identifiants InterPro séparés par des points-virgules"
+            )
+        
+        st.markdown("---")
+        col_submit, col_cancel = st.columns(2)
+        
+        with col_submit:
+            submit_button = st.form_submit_button("✅ Ajouter la protéine", type="primary", use_container_width=True)
+        
+        with col_cancel:
+            cancel_button = st.form_submit_button("❌ Annuler", use_container_width=True)
+        
+        if cancel_button:
+            st.session_state.show_add_protein_modal = False
+            st.rerun()
+        
+        if submit_button:
+            # Validation des champs obligatoires
+            if not new_entry or not new_entry_name or not new_organism or not new_protein_names or not new_sequence:
+                st.error("❌ Veuillez remplir tous les champs obligatoires (marqués par *)")
+            else:
+                # Préparation des données
+                protein_data = {
+                    "entry": new_entry.strip(),
+                    "entry_name": new_entry_name.strip(),
+                    "protein_names": new_protein_names.strip(),
+                    "organism": new_organism.strip(),
+                    "sequence": new_sequence.strip().replace("\n", "").replace(" ", ""),
+                    "ec_numbers": new_ec_numbers.strip() if new_ec_numbers else "",
+                    "interpro": new_interpro.strip() if new_interpro else ""
+                }
+                
+                # Appel de la fonction add_protein
+                with st.spinner("⏳ Ajout de la protéine en cours..."):
+                    try:
+                        result = add_protein(protein_data)
+                        
+                        if result.get("success"):
+                            st.session_state.add_protein_message = {
+                                "type": "success",
+                                "text": f"✅ Protéine `{new_entry}` ajoutée avec succès ! "
+                            }
+                        else:
+                            st.session_state.add_protein_message = {
+                                "type": "error",
+                                "text": f"❌ Erreur lors de l'ajout de la protéine `{new_entry}`. Vérifiez les logs."
+                            }
+                        
+                        st.session_state.show_add_protein_modal = False
+                        st.rerun()
+                    
+                    except Exception as e:
+                        st.error(f"❌ Erreur lors de l'ajout : {e}")
+    
+    st.markdown("---")
+
+
 
 st.markdown("---")
 
@@ -233,11 +353,6 @@ page_size = st.sidebar.selectbox(
 # Bouton de recherche
 search_button = st.sidebar.button("🔍 Rechercher", type="primary", use_container_width=True)
 
-# Bouton reset
-if st.sidebar.button("🔄 Réinitialiser", use_container_width=True):
-    reset_all()
-    st.rerun()
-
 # Fonction pour construire l'expression avancée à partir des groupes
 def build_advanced_expression(groups):
     """
@@ -330,6 +445,21 @@ def display_results(results_data):
         st.metric("🔢 Résultats affichés", len(results))
     
     st.markdown("---")
+    
+    # ======== MESSAGE D'AJOUT DE PROTÉINE ========
+    if st.session_state.add_protein_message:
+        msg = st.session_state.add_protein_message
+        col_msg, col_close = st.columns([10, 1])
+        with col_msg:
+            if msg["type"] == "success":
+                st.success(msg["text"])
+            else:
+                st.error(msg["text"])
+        with col_close:
+            if st.button("✖", key="close_add_msg", help="Fermer"):
+                st.session_state.add_protein_message = None
+                st.rerun()
+        st.markdown("---")
     
     # ======== MESSAGE DE SUPPRESSION ========
     if st.session_state.delete_message:
@@ -654,9 +784,6 @@ def display_results(results_data):
 # Logique principale
 try:
     db = get_database()
-    
-    # Afficher un message de connexion réussie
-    st.sidebar.success("✅ Connecté à MongoDB")
     
     # Exécuter la recherche
     filters = build_filters()

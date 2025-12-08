@@ -3,6 +3,22 @@
 import pandas as pd
 from collections import defaultdict
 
+def expand_ec(ec_list):
+    expanded = set()
+    for ec in ec_list:
+        if not ec:
+            continue
+        parts = ec.split('.')  # ex: ['1', '1', '1', '1']
+        current = ""
+        for i, part in enumerate(parts):
+            if part == '-':
+                continue
+            current += part
+            expanded.add(current)  # '1', puis '1.1', etc.
+            if i < len(parts) - 1:
+                current += "."
+    return list(expanded)
+
 def build_protein_graph(tsv_file, nodes_file="backend/data/processed/nodes.csv", edges_file="backend/data/processed/edges.csv"):
     df = pd.read_csv(tsv_file, sep="\t", dtype=str)
     df = df.fillna("")
@@ -39,7 +55,12 @@ def build_protein_graph(tsv_file, nodes_file="backend/data/processed/nodes.csv",
     edges_df.to_csv(edges_file, index=False)
     print(f"{len(edges_df)} arêtes exportées dans {edges_file}")
 
+    # Colonne actuelle (inchangée)
     df['EC_numbers'] = df['EC number'].apply(lambda x: x.split(";") if x else [])
+
+    # Nouvelle colonne enrichie hiérarchique
+    df['EC_hierarchy_labels'] = df['EC_numbers'].apply(expand_ec)
+
     df.to_csv(nodes_file, index=False)
     print(f"{len(df)} nœuds exportés dans {nodes_file}")
 

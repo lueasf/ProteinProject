@@ -1,0 +1,538 @@
+import os
+from collections import defaultdict
+
+from neo4j import GraphDatabase
+from tqdm import tqdm
+import numpy as np
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.metrics import precision_score, recall_score, f1_score
+import csv
+
+# -------------------------------------------------------------------
+# Connexion Neo4j (mêmes variables d'env que neo4j_graph_builder.py)
+# -------------------------------------------------------------------
+
+uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+user = os.getenv("NEO4J_USER", "neo4j")
+password = os.getenv("NEO4J_PASSWORD", "NoSQLProject")
+database_name = os.getenv("NEO4J_DATABASE_NAME", "project")
+
+driver = GraphDatabase.driver(uri, auth=(user, password))
+
+# -------------------------------------------------------------------
+# Fonctions utilitaires
+# -------------------------------------------------------------------
+
+def get_ec_level(ec: str) -> int:
+    """
+    Retourne le niveau hiérarchique d'un code EC (1 à 4).
+    Ex: '1' -> 1, '1.2' -> 2, '1.2.3' -> 3, '1.2.3.4' -> 4.
+    Les '-' sont ignorés.
+    """
+    if not ec:
+        return 0
+    parts = [p for p in ec.split('.') if p and p != '-']
+    return len(parts)
+
+
+# -------------------------------------------------------------------
+# Split train / test
+# -------------------------------------------------------------------
+
+def setup_train_test_split(session, test_ratio: float = 0.2): # Ici on prend par défaut 20% des nœuds avec EC connus en test
+    """
+    Marque aléatoirement les noeuds comme 'train' ou 'test' dans Neo4j.
+    On ne met en 'test' que des noeuds avec au moins un EC connu.
+    """
+    # Tout le monde en train
+    session.run("MATCH (n:Protein) REMOVE n.subset")
+    session.run("MATCH (n:Protein) SET n.subset = 'train'")
+
+    # Sous-ensemble en test parmi ceux qui ont des EC connus
+    query = """
+    MATCH (n:Protein)
+    WHERE n.ec_numbers IS NOT NULL AND size(n.ec_numbers) > 0
+    WITH n, rand() AS r
+    WHERE r < $ratio
+    SET n.subset = 'test'
+    RETURN count(n) AS test_count
+    """
+    result = session.run(query, ratio=test_ratio)
+    count = result.single()["test_count"]
+    print(f"   Split créé : {count} nœuds en TEST (le reste en TRAIN)")
+    return count
+
+
+# -------------------------------------------------------------------
+# Propagation hiérarchique basée sur les poids des arêtes
+# -------------------------------------------------------------------
+
+def propagate_labels(session, min_weight_threshold: float = 0.0,
+                     normalize_scores: bool = True,
+                     score_threshold: float | None = 0.1):
+    """
+    Algorithme de type 'weighted voting' sur la hiérarchie EC.
+
+    Pour chaque nœud TEST:
+      - on regarde les voisins TRAIN via :SIMILAR (pondéré par r.weight)
+      - on récupère neighbor.ec_hierarchy_labels (liste de codes hiérarchiques)
+      - on somme les poids pour chaque code EC hiérarchique
+
+    Retourne:
+      - y_pred: liste de listes de codes EC prédits (pour évaluation)
+      - y_true: liste de listes de codes EC réels (hiérarchiques)
+      - predictions_detail: dict entry -> liste triée de {ec, score}
+                            (scores éventuellement normalisés) pour le front.
+    """
+    query = """
+    MATCH (target:Protein {subset: 'test'})
+    MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'train'})
+    WHERE r.weight > $min_weight
+
+    // Déplier les EC hiérarchiques des voisins
+    UNWIND neighbor.ec_hierarchy_labels AS ec
+
+    // Cumuler les poids pour chaque code EC hiérarchique
+    WITH target, ec, sum(r.weight) AS score
+    ORDER BY score DESC
+
+    // Regrouper par cible
+    WITH target, collect({ec: ec, score: score}) AS predicted_list
+
+    RETURN
+      target.entry AS entry,
+      target.ec_hierarchy_labels AS true_labels,
+      predicted_list
+    """
+
+    result = session.run(query, min_weight=min_weight_threshold)
+
+    y_pred = []
+    y_true = []
+    predictions_detail = {}
+
+    for record in result:
+        entry = record["entry"]
+        true_labels = record["true_labels"] or []
+        predicted_data = record["predicted_list"] or []
+
+        if not predicted_data:
+            # Aucun voisin train ou scores tous filtrés
+            continue
+
+        # Normalisation optionnelle pour interpréter les scores comme des "probas"
+        if normalize_scores:
+            total_score = sum(item["score"] for item in predicted_data)
+            if total_score > 0:
+                predicted_data = [
+                    {"ec": item["ec"], "score": item["score"] / total_score}
+                    for item in predicted_data
+                ]
+
+        # On garde la liste de détails pour le front
+        predictions_detail[entry] = predicted_data
+
+        if score_threshold is not None:
+            best_predictions = [item["ec"] for item in predicted_data
+                                if item["score"] >= score_threshold]
+            if not best_predictions and predicted_data:
+                best_predictions = [predicted_data[0]["ec"]]
+        else:
+            # fallback : tout garder
+            best_predictions = [item["ec"] for item in predicted_data]
+
+        y_true.append(true_labels)
+        y_pred.append(best_predictions)
+
+    return y_pred, y_true, predictions_detail
+
+
+# -------------------------------------------------------------------
+# Évaluation multi-label
+# -------------------------------------------------------------------
+
+def evaluate_metrics(y_pred, y_true):
+    """
+    Calcule precision / recall / f1 en multi-label avec scikit-learn.
+    On binarise sur l'union des labels vrais + prédits.
+    """
+    if not y_true or not y_pred:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+    mlb = MultiLabelBinarizer()
+    mlb.fit(y_true + y_pred)
+
+    y_true_bin = mlb.transform(y_true)
+    y_pred_bin = mlb.transform(y_pred)
+
+    return {
+        "precision": precision_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        ),
+        "recall": recall_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        ),
+        "f1": f1_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        ),
+    }
+
+
+def evaluate_metrics_by_level(y_pred, y_true):
+    """
+    Calcule precision/recall/f1 séparément pour les niveaux 1, 2, 3, 4.
+    Retourne un dict: {1: {...}, 2: {...}, 3: {...}, 4: {...}}
+    """
+    levels = {1, 2, 3, 4}
+    results = {}
+
+    for level in levels:
+        # Filtrer les labels de ce niveau
+        y_true_level = [
+            [ec for ec in labels if get_ec_level(ec) == level]
+            for labels in y_true
+        ]
+        y_pred_level = [
+            [ec for ec in labels if get_ec_level(ec) == level]
+            for labels in y_pred
+        ]
+
+        # S'il n'y a aucun label sur ce niveau, on renvoie des 0
+        if all(len(lbls) == 0 for lbls in y_true_level) and all(
+            len(lbls) == 0 for lbls in y_pred_level
+        ):
+            results[level] = {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+            continue
+
+        mlb = MultiLabelBinarizer()
+        mlb.fit(y_true_level + y_pred_level)
+
+        y_true_bin = mlb.transform(y_true_level)
+        y_pred_bin = mlb.transform(y_pred_level)
+
+        prec = precision_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        )
+        rec = recall_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        )
+        f1 = f1_score(
+            y_true_bin, y_pred_bin, average="micro", zero_division=0
+        )
+
+        results[level] = {"precision": prec, "recall": rec, "f1": f1}
+
+    return results
+
+
+# -------------------------------------------------------------------
+# Validation répétée de type "cross-validation"
+# -------------------------------------------------------------------
+
+def run_repeated_validation(session, n_repeats: int = 5, test_ratio: float = 0.2):
+    """
+    Effectue plusieurs splits aléatoires train/test, lance la propagation,
+    et agrège les métriques.
+
+    Ce n'est pas du k-fold strict (où chaque nœud est utilisé exactement
+    une fois en test), mais une répétition de random splits.
+    """
+    print(f"\n🚀 Démarrage de la validation répétée ({n_repeats} itérations)...")
+
+    scores = {"precision": [], "recall": [], "f1": []}
+    # pour les niveaux 1..4
+    level_scores = {1: {"precision": [], "recall": [], "f1": []},
+                    2: {"precision": [], "recall": [], "f1": []},
+                    3: {"precision": [], "recall": [], "f1": []},
+                    4: {"precision": [], "recall": [], "f1": []}}
+
+    for i in range(n_repeats):
+        print(f"\n--- Repeat {i+1}/{n_repeats} ---")
+
+        test_count = setup_train_test_split(session, test_ratio=test_ratio)
+        if test_count == 0:
+            print("⚠️ Aucun nœud test disponible pour ce split, on skip.")
+            continue
+
+        y_pred, y_true, predictions_detail = propagate_labels(session, score_threshold=0.1)
+
+        if not y_pred:
+            print("⚠️ Aucune prédiction effectuée pour ce split.")
+            continue
+
+        # Afficher quelques exemples du set de test pour ce split
+        show_test_examples(session, predictions_detail, k=5)
+
+        # métriques globales (tous niveaux confondus)
+        fold_metrics = evaluate_metrics(y_pred, y_true)
+        scores["precision"].append(fold_metrics["precision"])
+        scores["recall"].append(fold_metrics["recall"])
+        scores["f1"].append(fold_metrics["f1"])
+
+        print(f"   Global - Précision: {fold_metrics['precision']:.4f}")
+        print(f"            Rappel:    {fold_metrics['recall']:.4f}")
+        print(f"            F1-Score:  {fold_metrics['f1']:.4f}")
+
+        # métriques par niveau
+        fold_by_level = evaluate_metrics_by_level(y_pred, y_true)
+        for level, m in fold_by_level.items():
+            level_scores[level]["precision"].append(m["precision"])
+            level_scores[level]["recall"].append(m["recall"])
+            level_scores[level]["f1"].append(m["f1"])
+            print(
+                f"   Niveau {level} - P: {m['precision']:.4f} "
+                f"R: {m['recall']:.4f} F1: {m['f1']:.4f}"
+            )
+
+    if scores["precision"]:
+        print("\n📊 Résultats Moyens :")
+        print(f"Moyenne Précision : {np.mean(scores['precision']):.4f}")
+        print(f"Moyenne Rappel    : {np.mean(scores['recall']):.4f}")
+        print(f"Moyenne F1        : {np.mean(scores['f1']):.4f}")
+    else:
+        print("\n⚠️ Impossible de calculer des moyennes (aucune prédiction valide).")
+
+    print("\n📊 Résultats Moyens par niveau :")
+    for level in sorted(level_scores.keys()):
+        if level_scores[level]["precision"]:
+            print(
+                f" Niveau {level} - "
+                f"P: {np.mean(level_scores[level]['precision']):.4f} "
+                f"R: {np.mean(level_scores[level]['recall']):.4f} "
+                f"F1: {np.mean(level_scores[level]['f1']):.4f}"
+            )
+
+
+# -------------------------------------------------------------------
+# Prédiction finale pour tous les noeuds et export CSV
+# -------------------------------------------------------------------
+
+def compute_final_predictions_and_export(
+    session,
+    nodes_csv_in: str = "backend/data/processed/nodes.csv",
+    nodes_csv_out: str = "backend/data/processed/nodes_with_predictions.csv",
+    min_weight_threshold: float = 0.0,
+    normalize_scores: bool = True,
+):
+    """
+    1. Considère tous les noeuds ayant des EC connus comme "labeled".
+    2. Pour tous les noeuds (y compris sans EC), agrège les votes depuis les voisins labeled.
+    3. Écrit un nouveau CSV avec, pour chaque entrée:
+         - predicted_ec_hierarchy (liste de codes hiérarchiques triés)
+         - predicted_ec_scores (liste des scores alignés)
+    """
+
+    print("\n🔎 Calcul des prédictions finales pour tous les noeuds...")
+
+    # On marque explicitement les noeuds contenant des EC comme 'labeled'
+    session.run("MATCH (n:Protein) REMOVE n.subset")
+    session.run(
+        """
+        MATCH (n:Protein)
+        SET n.subset = CASE
+            WHEN n.ec_numbers IS NOT NULL AND size(n.ec_numbers) > 0
+            THEN 'labeled' ELSE 'unlabeled' END
+        """
+    )
+
+    # Requête: pour chaque noeud (labeled ou pas), on agrège les infos des voisins labellisés
+    query = """
+    MATCH (target:Protein)
+    OPTIONAL MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'labeled'})
+    WHERE r.weight > $min_weight
+
+    // On passe tout à la suite, neighbor peut être NULL
+    WITH target, r, neighbor
+    // On ne déroule que si neighbor existe
+    WHERE neighbor IS NOT NULL
+    UNWIND neighbor.ec_hierarchy_labels AS ec
+
+    WITH target, ec, r
+    WHERE ec IS NOT NULL
+
+    WITH target, ec, sum(r.weight) AS score
+    ORDER BY score DESC
+
+    WITH target, collect({ec: ec, score: score}) AS predicted_list
+
+    RETURN
+        target.entry AS entry,
+        target.ec_hierarchy_labels AS true_labels,
+        predicted_list
+    """
+
+    result = session.run(
+        query,
+        min_weight=min_weight_threshold,
+    )
+
+    # On indexe les prédictions par entry
+    entry_to_predicted = {}
+
+    for record in result:
+        entry = record["entry"]
+        predicted_data = record["predicted_list"] or []
+
+        if normalize_scores and predicted_data:
+            total_score = sum(item["score"] for item in predicted_data)
+            if total_score > 0:
+                predicted_data = [
+                    {"ec": item["ec"], "score": item["score"] / total_score}
+                    for item in predicted_data
+                ]
+
+        entry_to_predicted[entry] = predicted_data
+
+    print(f"   Prédictions calculées pour {len(entry_to_predicted)} nœuds.")
+
+    # On charge nodes.csv et on ajoute deux colonnes
+    with open(nodes_csv_in, newline="", encoding="utf-8") as f_in, open(
+        nodes_csv_out, "w", newline="", encoding="utf-8"
+    ) as f_out:
+        reader = csv.DictReader(f_in)
+        fieldnames = reader.fieldnames + [
+            "predicted_ec_hierarchy",
+            "predicted_ec_scores",
+        ]
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in reader:
+            entry = row.get("Entry")
+            preds = entry_to_predicted.get(entry, [])
+
+            # Sérialisation simple en chaînes lisibles (listes)
+            predicted_ecs = [p["ec"] for p in preds]
+            predicted_scores = [p["score"] for p in preds]
+
+            row["predicted_ec_hierarchy"] = str(predicted_ecs)
+            row["predicted_ec_scores"] = str(predicted_scores)
+
+            writer.writerow(row)
+
+    print(f"✅ CSV avec prédictions exporté dans {nodes_csv_out}")
+    # Afficher quelques exemples de noeuds sans EC réel
+    show_unlabeled_examples_from_csv(nodes_csv_out, k=5)
+
+
+# -------------------------------------------------------------------
+# Affichage des exemples de test
+# -------------------------------------------------------------------
+
+def show_test_examples(session, predictions_detail, k: int = 5):
+    """
+    Affiche k exemples de noeuds du set de test avec :
+      - Entry
+      - EC hiérarchiques vrais
+      - quelques labels prédits avec leurs scores
+    """
+    # Récupérer les entrées test concernées (celles pour lesquelles on a des prédictions)
+    entries = list(predictions_detail.keys())[:k]
+    if not entries:
+        print("   (Aucun exemple à afficher, pas de prédictions)")
+        return
+
+    # Récupérer les infos de base depuis Neo4j
+    query = """
+    MATCH (p:Protein)
+    WHERE p.entry IN $entries
+    RETURN p.entry AS entry,
+           p.ec_numbers AS ec_numbers,
+           p.ec_hierarchy_labels AS ec_hierarchy_labels
+    """
+    result = session.run(query, entries=entries)
+    entry_to_info = {r["entry"]: r for r in result}
+
+    print("\n   🔍 Exemples de noeuds TEST (vrais vs prédits) :")
+    for entry in entries:
+        info = entry_to_info.get(entry, {})
+        true_ec_numbers = info.get("ec_numbers", [])
+        true_hier = info.get("ec_hierarchy_labels", [])
+
+        preds = predictions_detail.get(entry, [])
+        print(f"   - Entry: {entry}")
+        print(f"     True EC numbers: {true_ec_numbers}")
+        print(f"     True hierarchy : {true_hier}")
+
+        # Afficher quelques labels prédits avec leurs scores
+        for item in preds[:5]:
+            ec = item["ec"]
+            score = item["score"]
+            level = get_ec_level(ec)
+            print(f"       Predicted: {ec} (level {level}) score={score:.3f}")
+        print()
+
+
+def show_unlabeled_examples_from_csv(nodes_csv_out: str, k: int = 5):
+    """
+    Affiche quelques exemples de noeuds SANS EC réel dans le CSV
+    nodes_with_predictions.csv, avec leurs labels hiérarchiques prédits
+    et scores (pour s'en inspirer dans le front).
+    """
+    print(f"\n🔍 Exemples de noeuds sans EC réel (depuis {nodes_csv_out}) :")
+
+    examples_shown = 0
+    with open(nodes_csv_out, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # On considère "sans EC" si EC_numbers (ou EC number selon ton CSV) est vide
+            ec_numbers_raw = row.get("EC_numbers") or row.get("EC number") or ""
+            has_ec = bool(ec_numbers_raw and ec_numbers_raw.strip() not in ("[]", ""))
+
+            if has_ec:
+                continue
+
+            entry = row.get("Entry")
+            predicted_ecs_str = row.get("predicted_ec_hierarchy", "[]")
+            predicted_scores_str = row.get("predicted_ec_scores", "[]")
+
+            try:
+                predicted_ecs = eval(predicted_ecs_str)
+            except Exception:
+                predicted_ecs = []
+            try:
+                predicted_scores = eval(predicted_scores_str)
+            except Exception:
+                predicted_scores = []
+
+            print(f"   - Entry: {entry}")
+            for ec, score in list(zip(predicted_ecs, predicted_scores))[:5]:
+                level = get_ec_level(ec)
+                print(f"       Predicted: {ec} (level {level}) score={score:.3f}")
+            print()
+
+            examples_shown += 1
+            if examples_shown >= k:
+                break
+
+    if examples_shown == 0:
+        print("   (Aucun noeud sans EC réel trouvé dans le CSV)")
+
+
+# -------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    with driver.session(database=database_name) as session:
+        # Option 1 : validation répétée
+        run_repeated_validation(session, n_repeats=5, test_ratio=0.2)
+
+        # Option 2 : prédictions finales sur tous les noeuds + export CSV
+        compute_final_predictions_and_export(
+            session,
+            nodes_csv_in="backend/data/processed/nodes.csv",
+            nodes_csv_out="backend/data/processed/nodes_with_predictions.csv",
+            min_weight_threshold=0.0,
+            normalize_scores=True,
+        )
+
+        # Option 3 : Affichage d'exemples de test
+        # (décommenter pour afficher, nécessite un petit temps de calcul)
+        # y_pred, y_true, predictions_detail = propagate_labels(session, score_threshold=0.1)
+        # show_test_examples(session, predictions_detail, k=5)
+
+        # Option 4 : Affichage d'exemples de noeuds sans EC réel (depuis le CSV)
+        # show_unlabeled_examples_from_csv("backend/data/processed/nodes_with_predictions.csv", k=5)
+
+    driver.close()

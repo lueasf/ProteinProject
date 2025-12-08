@@ -6,3 +6,5 @@ tqdm
 streamlit
 streamlit-searchbox
 plotly
+numpy
+scikit-learn

@@ -213,3 +213,6 @@ __marimo__/
 /resources/
 *.tsv
 *.csv
+backend/app/data/processed/
+backend/data/processed/edges.csv
+backend/data/processed/nodes.csv

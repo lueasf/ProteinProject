@@ -68,6 +68,12 @@ def import_nodes_optimized(session, nodes_csv_path, batch_size=500):
                 ec_numbers = ast.literal_eval(row['EC_numbers']) if row['EC_numbers'] else []
             except:
                 ec_numbers = row['EC_numbers'].split(';') if row['EC_numbers'] else []
+
+            # nouvelle colonne : EC hiérarchiques
+            try:
+                ec_hierarchy_labels = ast.literal_eval(row['EC_hierarchy_labels']) if row['EC_hierarchy_labels'] else []
+            except:
+                ec_hierarchy_labels = row['EC_hierarchy_labels'].split(';') if row['EC_hierarchy_labels'] else []
             
             batch.append({
                 'entry': row['Entry'],
@@ -76,7 +82,8 @@ def import_nodes_optimized(session, nodes_csv_path, batch_size=500):
                 'organism': row.get('Organism', ''),
                 'sequence': row['Sequence'],
                 'ec_numbers': ec_numbers,
-                'interpro_list': interpro_list
+                'interpro_list': interpro_list,
+                'ec_hierarchy_labels': ec_hierarchy_labels,
             })
             
             if len(batch) >= batch_size:
@@ -90,7 +97,8 @@ def import_nodes_optimized(session, nodes_csv_path, batch_size=500):
                         organism: node.organism,
                         sequence: node.sequence,
                         ec_numbers: node.ec_numbers,
-                        interpro_list: node.interpro_list
+                        interpro_list: node.interpro_list,
+                        ec_hierarchy_labels: node.ec_hierarchy_labels
                     })
                     """,
                     batch=b
@@ -108,7 +116,8 @@ def import_nodes_optimized(session, nodes_csv_path, batch_size=500):
                     organism: node.organism,
                     sequence: node.sequence,
                     ec_numbers: node.ec_numbers,
-                    interpro_list: node.interpro_list
+                    interpro_list: node.interpro_list,
+                    ec_hierarchy_labels: node.ec_hierarchy_labels
                 })
                 """,
                 batch=b

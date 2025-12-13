@@ -6,7 +6,6 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import precision_score, recall_score, f1_score
-import csv
 
 # -------------------------------------------------------------------
 # Connexion Neo4j (mêmes variables d'env que neo4j_graph_builder.py)
@@ -304,25 +303,31 @@ def run_repeated_validation(session, n_repeats: int = 5, test_ratio: float = 0.2
 
 
 # -------------------------------------------------------------------
-# Prédiction finale pour tous les noeuds et export CSV
+# Prédiction finale pour tous les noeuds et stockage dans Neo4j + MongoDB
 # -------------------------------------------------------------------
 
-def compute_final_predictions_and_export(
+def compute_final_predictions_and_store(
     session,
-    nodes_csv_in: str = "backend/data/processed/nodes.csv",
-    nodes_csv_out: str = "backend/data/processed/nodes_with_predictions.csv",
     min_weight_threshold: float = 0.0,
     normalize_scores: bool = True,
+    batch_size: int = 500,
 ):
     """
     1. Considère tous les noeuds ayant des EC connus comme "labeled".
-    2. Pour tous les noeuds (y compris sans EC), agrège les votes depuis les voisins labeled.
-    3. Écrit un nouveau CSV avec, pour chaque entrée:
-         - predicted_ec_hierarchy (liste de codes hiérarchiques triés)
-         - predicted_ec_scores (liste des scores alignés)
+    2. Pour les noeuds SANS EC (unlabeled), agrège les votes depuis les voisins labeled.
+    3. Met à jour directement ec_numbers dans Neo4j et MongoDB pour les protéines sans EC.
     """
+    from pymongo import MongoClient
+    import dotenv
+    
+    dotenv.load_dotenv()
+    
+    # Connexion MongoDB
+    MONGO_URI = os.getenv("MONGO_URI")
+    DB_NAME = os.getenv("DB_NAME")
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME")
 
-    print("\n🔎 Calcul des prédictions finales pour tous les noeuds...")
+    print("\n🔎 Calcul des prédictions finales pour les noeuds sans EC...")
 
     # On marque explicitement les noeuds contenant des EC comme 'labeled'
     session.run("MATCH (n:Protein) REMOVE n.subset")
@@ -335,20 +340,13 @@ def compute_final_predictions_and_export(
         """
     )
 
-    # Requête: pour chaque noeud (labeled ou pas), on agrège les infos des voisins labellisés
+    # Requête: UNIQUEMENT pour les noeuds unlabeled, on agrège les infos des voisins labellisés
     query = """
-    MATCH (target:Protein)
-    OPTIONAL MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'labeled'})
+    MATCH (target:Protein {subset: 'unlabeled'})
+    MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'labeled'})
     WHERE r.weight > $min_weight
 
-    // On passe tout à la suite, neighbor peut être NULL
-    WITH target, r, neighbor
-    // On ne déroule que si neighbor existe
-    WHERE neighbor IS NOT NULL
-    UNWIND neighbor.ec_hierarchy_labels AS ec
-
-    WITH target, ec, r
-    WHERE ec IS NOT NULL
+    UNWIND neighbor.ec_numbers AS ec
 
     WITH target, ec, sum(r.weight) AS score
     ORDER BY score DESC
@@ -357,7 +355,6 @@ def compute_final_predictions_and_export(
 
     RETURN
         target.entry AS entry,
-        target.ec_hierarchy_labels AS true_labels,
         predicted_list
     """
 
@@ -366,8 +363,8 @@ def compute_final_predictions_and_export(
         min_weight=min_weight_threshold,
     )
 
-    # On indexe les prédictions par entry
-    entry_to_predicted = {}
+    # On prépare les mises à jour
+    updates = []
 
     for record in result:
         entry = record["entry"]
@@ -381,38 +378,89 @@ def compute_final_predictions_and_export(
                     for item in predicted_data
                 ]
 
-        entry_to_predicted[entry] = predicted_data
-
-    print(f"   Prédictions calculées pour {len(entry_to_predicted)} nœuds.")
-
-    # On charge nodes.csv et on ajoute deux colonnes
-    with open(nodes_csv_in, newline="", encoding="utf-8") as f_in, open(
-        nodes_csv_out, "w", newline="", encoding="utf-8"
-    ) as f_out:
-        reader = csv.DictReader(f_in)
-        fieldnames = reader.fieldnames + [
-            "predicted_ec_hierarchy",
-            "predicted_ec_scores",
+        # Filtrer uniquement les EC complets (niveau 4 : X.X.X.X)
+        full_ec_predictions = [
+            p for p in predicted_data if get_ec_level(p["ec"]) == 4
         ]
-        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
-        writer.writeheader()
 
-        for row in reader:
-            entry = row.get("Entry")
-            preds = entry_to_predicted.get(entry, [])
+        # Prendre le meilleur EC (score le plus élevé)
+        if full_ec_predictions:
+            best_ec = full_ec_predictions[0]["ec"]
+            updates.append({
+                "entry": entry,
+                "ec_numbers": [best_ec],
+            })
 
-            # Sérialisation simple en chaînes lisibles (listes)
-            predicted_ecs = [p["ec"] for p in preds]
-            predicted_scores = [p["score"] for p in preds]
+    print(f"   Prédictions calculées pour {len(updates)} nœuds sans EC.")
 
-            row["predicted_ec_hierarchy"] = str(predicted_ecs)
-            row["predicted_ec_scores"] = str(predicted_scores)
+    if not updates:
+        print("   Aucune prédiction à appliquer.")
+        return
 
-            writer.writerow(row)
+    # --- Mise à jour Neo4j ---
+    def update_batch_neo4j(tx, batch):
+        tx.run(
+            """
+            UNWIND $batch AS update
+            MATCH (p:Protein {entry: update.entry})
+            WHERE p.ec_numbers IS NULL OR size(p.ec_numbers) = 0
+            SET p.ec_numbers = update.ec_numbers
+            """,
+            batch=batch,
+        )
 
-    print(f"✅ CSV avec prédictions exporté dans {nodes_csv_out}")
-    # Afficher quelques exemples de noeuds sans EC réel
-    show_unlabeled_examples_from_csv(nodes_csv_out, k=5)
+    total_updated_neo4j = 0
+    for i in tqdm(range(0, len(updates), batch_size), desc="Mise à jour Neo4j"):
+        batch = updates[i : i + batch_size]
+        session.execute_write(update_batch_neo4j, batch)
+        total_updated_neo4j += len(batch)
+
+    print(f"✅ {total_updated_neo4j} nœuds mis à jour dans Neo4j (ec_numbers)")
+
+    # --- Mise à jour MongoDB ---
+    try:
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+        
+        total_updated_mongo = 0
+        for update in tqdm(updates, desc="Mise à jour MongoDB"):
+            result = collection.update_one(
+                {
+                    "_id": update["entry"],
+                    "$or": [
+                        {"annotations.ec_numbers": {"$exists": False}},
+                        {"annotations.ec_numbers": []},
+                        {"annotations.ec_numbers": None}
+                    ]
+                },
+                {"$set": {"annotations.ec_numbers": update["ec_numbers"]}}
+            )
+            if result.modified_count > 0:
+                total_updated_mongo += 1
+        
+        client.close()
+        print(f"✅ {total_updated_mongo} documents mis à jour dans MongoDB (annotations.ec_numbers)")
+        
+    except Exception as e:
+        print(f"❌ Erreur MongoDB: {e}")
+    
+    # Afficher quelques exemples
+    show_updated_examples(session, updates[:5])
+
+
+def show_updated_examples(session, updates, k: int = 5):
+    """
+    Affiche quelques exemples de noeuds qui ont été mis à jour avec des EC prédits.
+    """
+    print(f"\n🔍 Exemples de noeuds mis à jour avec EC prédit :")
+    
+    for update in updates[:k]:
+        entry = update["entry"]
+        ec_numbers = update["ec_numbers"]
+        print(f"   - Entry: {entry}")
+        print(f"     EC prédit: {ec_numbers}")
+        print()
 
 
 # -------------------------------------------------------------------
@@ -463,50 +511,210 @@ def show_test_examples(session, predictions_detail, k: int = 5):
         print()
 
 
-def show_unlabeled_examples_from_csv(nodes_csv_out: str, k: int = 5):
-    """
-    Affiche quelques exemples de noeuds SANS EC réel dans le CSV
-    nodes_with_predictions.csv, avec leurs labels hiérarchiques prédits
-    et scores (pour s'en inspirer dans le front).
-    """
-    print(f"\n🔍 Exemples de noeuds sans EC réel (depuis {nodes_csv_out}) :")
+# -------------------------------------------------------------------
+# API pour le Frontend
+# -------------------------------------------------------------------
 
-    examples_shown = 0
-    with open(nodes_csv_out, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # On considère "sans EC" si EC_numbers (ou EC number selon ton CSV) est vide
-            ec_numbers_raw = row.get("EC_numbers") or row.get("EC number") or ""
-            has_ec = bool(ec_numbers_raw and ec_numbers_raw.strip() not in ("[]", ""))
+def run_validation_for_frontend(n_repeats: int = 5, test_ratio: float = 0.2):
+    """
+    Exécute la validation répétée et retourne les résultats pour le frontend.
+    
+    Returns:
+        dict avec:
+            - global_metrics: {"precision": float, "recall": float, "f1": float}
+            - level_metrics: {1: {...}, 2: {...}, 3: {...}, 4: {...}}
+            - n_repeats: int
+            - test_ratio: float
+    """
+    with driver.session(database=database_name) as session:
+        scores = {"precision": [], "recall": [], "f1": []}
+        level_scores = {
+            1: {"precision": [], "recall": [], "f1": []},
+            2: {"precision": [], "recall": [], "f1": []},
+            3: {"precision": [], "recall": [], "f1": []},
+            4: {"precision": [], "recall": [], "f1": []}
+        }
 
-            if has_ec:
+        for i in range(n_repeats):
+            test_count = setup_train_test_split(session, test_ratio=test_ratio)
+            if test_count == 0:
                 continue
 
-            entry = row.get("Entry")
-            predicted_ecs_str = row.get("predicted_ec_hierarchy", "[]")
-            predicted_scores_str = row.get("predicted_ec_scores", "[]")
+            y_pred, y_true, _ = propagate_labels(session, score_threshold=0.1)
 
-            try:
-                predicted_ecs = eval(predicted_ecs_str)
-            except Exception:
-                predicted_ecs = []
-            try:
-                predicted_scores = eval(predicted_scores_str)
-            except Exception:
-                predicted_scores = []
+            if not y_pred:
+                continue
 
-            print(f"   - Entry: {entry}")
-            for ec, score in list(zip(predicted_ecs, predicted_scores))[:5]:
-                level = get_ec_level(ec)
-                print(f"       Predicted: {ec} (level {level}) score={score:.3f}")
-            print()
+            # Métriques globales
+            fold_metrics = evaluate_metrics(y_pred, y_true)
+            scores["precision"].append(fold_metrics["precision"])
+            scores["recall"].append(fold_metrics["recall"])
+            scores["f1"].append(fold_metrics["f1"])
 
-            examples_shown += 1
-            if examples_shown >= k:
-                break
+            # Métriques par niveau
+            fold_by_level = evaluate_metrics_by_level(y_pred, y_true)
+            for level, m in fold_by_level.items():
+                level_scores[level]["precision"].append(m["precision"])
+                level_scores[level]["recall"].append(m["recall"])
+                level_scores[level]["f1"].append(m["f1"])
 
-    if examples_shown == 0:
-        print("   (Aucun noeud sans EC réel trouvé dans le CSV)")
+        # Calculer les moyennes
+        global_metrics = {
+            "precision": float(np.mean(scores["precision"])) if scores["precision"] else 0.0,
+            "recall": float(np.mean(scores["recall"])) if scores["recall"] else 0.0,
+            "f1": float(np.mean(scores["f1"])) if scores["f1"] else 0.0,
+        }
+
+        level_metrics = {}
+        for level in [1, 2, 3, 4]:
+            level_metrics[level] = {
+                "precision": float(np.mean(level_scores[level]["precision"])) if level_scores[level]["precision"] else 0.0,
+                "recall": float(np.mean(level_scores[level]["recall"])) if level_scores[level]["recall"] else 0.0,
+                "f1": float(np.mean(level_scores[level]["f1"])) if level_scores[level]["f1"] else 0.0,
+            }
+
+        return {
+            "global_metrics": global_metrics,
+            "level_metrics": level_metrics,
+            "n_repeats": n_repeats,
+            "test_ratio": test_ratio,
+        }
+
+
+def run_prediction_for_frontend(min_weight_threshold: float = 0.0):
+    """
+    Exécute la prédiction et mise à jour des EC pour les protéines sans EC.
+    
+    Returns:
+        dict avec:
+            - total_updated_neo4j: int
+            - total_updated_mongo: int
+            - examples: list de {"entry": str, "ec_numbers": list}
+    """
+    from pymongo import MongoClient
+    import dotenv
+    
+    dotenv.load_dotenv()
+    
+    MONGO_URI = os.getenv("MONGO_URI")
+    DB_NAME = os.getenv("DB_NAME")
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME")
+
+    with driver.session(database=database_name) as session:
+        # Marquer labeled/unlabeled
+        session.run("MATCH (n:Protein) REMOVE n.subset")
+        session.run(
+            """
+            MATCH (n:Protein)
+            SET n.subset = CASE
+                WHEN n.ec_numbers IS NOT NULL AND size(n.ec_numbers) > 0
+                THEN 'labeled' ELSE 'unlabeled' END
+            """
+        )
+
+        # Requête pour les noeuds unlabeled
+        query = """
+        MATCH (target:Protein {subset: 'unlabeled'})
+        MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'labeled'})
+        WHERE r.weight > $min_weight
+
+        UNWIND neighbor.ec_numbers AS ec
+
+        WITH target, ec, sum(r.weight) AS score
+        ORDER BY score DESC
+
+        WITH target, collect({ec: ec, score: score}) AS predicted_list
+
+        RETURN
+            target.entry AS entry,
+            predicted_list
+        """
+
+        result = session.run(query, min_weight=min_weight_threshold)
+
+        updates = []
+        for record in result:
+            entry = record["entry"]
+            predicted_data = record["predicted_list"] or []
+
+            # Normalisation
+            if predicted_data:
+                total_score = sum(item["score"] for item in predicted_data)
+                if total_score > 0:
+                    predicted_data = [
+                        {"ec": item["ec"], "score": item["score"] / total_score}
+                        for item in predicted_data
+                    ]
+
+            # Filtrer EC niveau 4
+            full_ec_predictions = [
+                p for p in predicted_data if get_ec_level(p["ec"]) == 4
+            ]
+
+            if full_ec_predictions:
+                best_ec = full_ec_predictions[0]["ec"]
+                updates.append({
+                    "entry": entry,
+                    "ec_numbers": [best_ec],
+                })
+
+        if not updates:
+            return {
+                "total_updated_neo4j": 0,
+                "total_updated_mongo": 0,
+                "examples": [],
+            }
+
+        # Mise à jour Neo4j
+        def update_batch_neo4j(tx, batch):
+            tx.run(
+                """
+                UNWIND $batch AS update
+                MATCH (p:Protein {entry: update.entry})
+                WHERE p.ec_numbers IS NULL OR size(p.ec_numbers) = 0
+                SET p.ec_numbers = update.ec_numbers
+                """,
+                batch=batch,
+            )
+
+        batch_size = 500
+        total_updated_neo4j = 0
+        for i in range(0, len(updates), batch_size):
+            batch = updates[i : i + batch_size]
+            session.execute_write(update_batch_neo4j, batch)
+            total_updated_neo4j += len(batch)
+
+        # Mise à jour MongoDB
+        total_updated_mongo = 0
+        try:
+            client = MongoClient(MONGO_URI)
+            db = client[DB_NAME]
+            collection = db[COLLECTION_NAME]
+            
+            for update in updates:
+                result = collection.update_one(
+                    {
+                        "_id": update["entry"],
+                        "$or": [
+                            {"annotations.ec_numbers": {"$exists": False}},
+                            {"annotations.ec_numbers": []},
+                            {"annotations.ec_numbers": None}
+                        ]
+                    },
+                    {"$set": {"annotations.ec_numbers": update["ec_numbers"]}}
+                )
+                if result.modified_count > 0:
+                    total_updated_mongo += 1
+            
+            client.close()
+        except Exception as e:
+            print(f"Erreur MongoDB: {e}")
+
+        return {
+            "total_updated_neo4j": total_updated_neo4j,
+            "total_updated_mongo": total_updated_mongo,
+            "examples": updates[:10],  # 10 premiers exemples
+        }
 
 
 # -------------------------------------------------------------------
@@ -515,24 +723,14 @@ def show_unlabeled_examples_from_csv(nodes_csv_out: str, k: int = 5):
 
 if __name__ == "__main__":
     with driver.session(database=database_name) as session:
-        # Option 1 : validation répétée
+        # Option 1 : validation répétée (pour évaluer les performances)
         run_repeated_validation(session, n_repeats=5, test_ratio=0.2)
 
-        # Option 2 : prédictions finales sur tous les noeuds + export CSV
-        compute_final_predictions_and_export(
+        # Option 2 : prédictions finales et mise à jour ec_numbers dans Neo4j + MongoDB
+        compute_final_predictions_and_store(
             session,
-            nodes_csv_in="backend/data/processed/nodes.csv",
-            nodes_csv_out="backend/data/processed/nodes_with_predictions.csv",
             min_weight_threshold=0.0,
             normalize_scores=True,
         )
-
-        # Option 3 : Affichage d'exemples de test
-        # (décommenter pour afficher, nécessite un petit temps de calcul)
-        # y_pred, y_true, predictions_detail = propagate_labels(session, score_threshold=0.1)
-        # show_test_examples(session, predictions_detail, k=5)
-
-        # Option 4 : Affichage d'exemples de noeuds sans EC réel (depuis le CSV)
-        # show_unlabeled_examples_from_csv("backend/data/processed/nodes_with_predictions.csv", k=5)
 
     driver.close()

@@ -1,116 +1,100 @@
 import os
-from typing import Dict, Optional
-import pandas as pd
+from typing import Dict
+from neo4j import GraphDatabase
+import dotenv
+
+dotenv.load_dotenv()
+
+# Configuration Neo4j
+uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+user = os.getenv("NEO4J_USER", "neo4j")
+password = os.getenv("NEO4J_PASSWORD", "NoSQLProject")
+database_name = os.getenv("NEO4J_DATABASE_NAME", "project")
 
 
-def _find_data_dir() -> str:
-
-    here = os.path.dirname(os.path.abspath(__file__))
-
-    backend_dir = os.path.abspath(os.path.join(here, ".."))
-
-    project_root = os.path.abspath(os.path.join(backend_dir, ".."))
-
-    candidate_backend = os.path.join(backend_dir, "data", "processed")
-    candidate_root = os.path.join(project_root, "data", "processed")
-
-    if os.path.isdir(candidate_backend):
-        return candidate_backend
-    if os.path.isdir(candidate_root):
-        return candidate_root
-
-    raise FileNotFoundError(
-        "Impossible de trouver le dossier data/processed.\n"
-        f"Chemins testés :\n  {candidate_backend}\n  {candidate_root}"
-    )
+def _get_driver():
+    """Crée et retourne un driver Neo4j."""
+    return GraphDatabase.driver(uri, auth=(user, password))
 
 
-def _load_nodes_edges(
-    nodes_csv_path: Optional[str] = None,
-    edges_csv_path: Optional[str] = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def compute_protein_stats() -> Dict[str, float]:
     """
-    Charge nodes.csv et edges.csv dans des DataFrame pandas.
-    Si les chemins ne sont pas fournis, on les déduit du projet.
-    """
-    data_dir = _find_data_dir()
-
-    if nodes_csv_path is None:
-        nodes_csv_path = os.path.join(data_dir, "nodes.csv")
-    if edges_csv_path is None:
-        edges_csv_path = os.path.join(data_dir, "edges.csv")
-
-    if not os.path.isfile(nodes_csv_path):
-        raise FileNotFoundError(f"nodes.csv introuvable : {nodes_csv_path}")
-    if not os.path.isfile(edges_csv_path):
-        raise FileNotFoundError(f"edges.csv introuvable : {edges_csv_path}")
-
-    nodes = pd.read_csv(nodes_csv_path)
-    edges = pd.read_csv(edges_csv_path)
-
-    return nodes, edges
-
-
-def compute_protein_stats(
-    nodes_csv_path: Optional[str] = None,
-    edges_csv_path: Optional[str] = None,
-) -> Dict[str, float]:
-    """
-    Calcule des statistiques globales à partir de nodes.csv et edges.csv.
+    Calcule des statistiques globales à partir de la base Neo4j.
 
     Renvoie un dict avec :
       - total_proteins
-      - labelled_proteins    (au moins une annotation EC_numbers)
+      - labelled_proteins    (au moins une annotation EC_numbers non vide)
       - unlabelled_proteins
-      - isolated_proteins    (aucun voisin dans edges)
+      - isolated_proteins    (aucun voisin dans les relations SIMILAR)
       - labelled_ratio       (labelled / total)
       - isolated_ratio       (isolated / total)
     """
-    nodes, edges = _load_nodes_edges(nodes_csv_path, edges_csv_path)
-
-    if "Entry" not in nodes.columns:
-        raise KeyError("La colonne 'Entry' est manquante dans nodes.csv")
-    if "EC_numbers" not in nodes.columns:
-        raise KeyError("La colonne 'EC_numbers' est manquante dans nodes.csv")
-    for col in ["Source", "Target"]:
-        if col not in edges.columns:
-            raise KeyError(f"La colonne '{col}' est manquante dans edges.csv")
-
-    ec_col = nodes["EC_numbers"].astype(str).str.strip()
-
-    unlabel_values = {"", "[]", "nan", "None"}
-    labelled_mask = ~ec_col.isin(unlabel_values)
-
-    total_proteins = int(len(nodes))
-    labelled_proteins = int(labelled_mask.sum())
-    unlabelled_proteins = int(total_proteins - labelled_proteins)
-
-    if len(edges) == 0:
-        isolated_proteins = total_proteins
-    else:
-        connected_entries = pd.unique(
-            pd.concat([edges["Source"], edges["Target"]], ignore_index=True)
-        )
-        connected_entries = pd.Series(connected_entries).dropna().astype(str)
-
-        isolated_mask = ~nodes["Entry"].astype(str).isin(connected_entries)
-        isolated_proteins = int(isolated_mask.sum())
-
-    labelled_ratio = (labelled_proteins / total_proteins * 100.0) if total_proteins else 0.0
-    isolated_ratio = (isolated_proteins / total_proteins * 100.0) if total_proteins else 0.0
-
-    return {
-        "total_proteins": total_proteins,
-        "labelled_proteins": labelled_proteins,
-        "unlabelled_proteins": unlabelled_proteins,
-        "isolated_proteins": isolated_proteins,
-        "labelled_ratio": labelled_ratio,
-        "isolated_ratio": isolated_ratio,
-    }
+    driver = _get_driver()
+    
+    try:
+        with driver.session(database=database_name) as session:
+            
+            # Requête pour obtenir toutes les statistiques en une seule fois
+            def get_stats(tx):
+                result = tx.run(
+                    """
+                    // Total des protéines
+                    MATCH (p:Protein)
+                    WITH count(p) AS total_proteins
+                    
+                    // Protéines labellées (ec_numbers non vide)
+                    OPTIONAL MATCH (labelled:Protein)
+                    WHERE labelled.ec_numbers IS NOT NULL 
+                      AND size(labelled.ec_numbers) > 0
+                    WITH total_proteins, count(labelled) AS labelled_proteins
+                    
+                    // Protéines isolées (sans relation SIMILAR)
+                    OPTIONAL MATCH (isolated:Protein)
+                    WHERE NOT (isolated)-[:SIMILAR]-()
+                    WITH total_proteins, labelled_proteins, count(isolated) AS isolated_proteins
+                    
+                    RETURN total_proteins, labelled_proteins, isolated_proteins
+                    """
+                )
+                return result.single()
+            
+            stats_result = session.execute_read(get_stats)
+            
+            if stats_result is None:
+                # Base vide
+                return {
+                    "total_proteins": 0,
+                    "labelled_proteins": 0,
+                    "unlabelled_proteins": 0,
+                    "isolated_proteins": 0,
+                    "labelled_ratio": 0.0,
+                    "isolated_ratio": 0.0,
+                }
+            
+            total_proteins = stats_result["total_proteins"]
+            labelled_proteins = stats_result["labelled_proteins"]
+            isolated_proteins = stats_result["isolated_proteins"]
+            
+            unlabelled_proteins = total_proteins - labelled_proteins
+            
+            labelled_ratio = (labelled_proteins / total_proteins * 100.0) if total_proteins else 0.0
+            isolated_ratio = (isolated_proteins / total_proteins * 100.0) if total_proteins else 0.0
+            
+            return {
+                "total_proteins": total_proteins,
+                "labelled_proteins": labelled_proteins,
+                "unlabelled_proteins": unlabelled_proteins,
+                "isolated_proteins": isolated_proteins,
+                "labelled_ratio": labelled_ratio,
+                "isolated_ratio": isolated_ratio,
+            }
+    
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":
     stats = compute_protein_stats()
-    print("=== Protein statistics ===")
+    print("=== Protein statistics (from Neo4j) ===")
     for k, v in stats.items():
         print(f"{k}: {v}")

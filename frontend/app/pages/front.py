@@ -86,6 +86,10 @@ if 'show_add_protein_modal' not in st.session_state:
 if 'add_protein_message' not in st.session_state:
     st.session_state.add_protein_message = None  # {"type": "success"|"error", "text": "..."}
 
+# Historique des statistiques
+if 'stats_history' not in st.session_state:
+    st.session_state.stats_history = []  # Liste de {"timestamp": "...", "stats": {...}}
+
 # Fonctions pour gérer les champs dynamiques
 def add_ec_group():
     st.session_state.ec_groups.append('')
@@ -125,7 +129,7 @@ with st.expander("ℹ️ Guide d'utilisation des filtres"):
 # ===========================================
 # BARRE DE RECHERCHE CENTRALE (auto-complétion)
 # ===========================================
-st.subheader("� Recherche rapide par nom de protéine")
+st.subheader("🔍︎ Recherche rapide par nom de protéine")
 
 # Searchbox avec auto-complétion en temps réel au centre de la page
 selected_protein = st_searchbox(
@@ -753,7 +757,6 @@ def display_results(results_data):
                             agraph(nodes=nodes, edges=edges, config=config) # Pas de key=agraph_key ici parfois ça bug avec agraph, test sans d'abord
 
     # Pagination
-    st.markdown("---")
     total_pages = max(1, (total + per_page - 1) // per_page)
     
     col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
@@ -780,6 +783,7 @@ def display_results(results_data):
         if st.button("Fin ⏭️", disabled=(page >= total_pages)):
             st.session_state.current_page = total_pages
             st.rerun()
+    st.markdown("---")
 
 # Logique principale
 try:
@@ -828,12 +832,12 @@ except Exception as e:
 
 
 import plotly.express as px
+from datetime import datetime
 from stats import compute_protein_stats  # nouveau
-@st.cache_data(show_spinner=False)
-def get_global_protein_stats():
+
+def get_fresh_protein_stats():
     """
-    Wrap de compute_protein_stats() avec cache Streamlit,
-    pour éviter de relire les gros CSV à chaque interaction.
+    Calcule les stats SANS cache (pour forcer un nouveau calcul).
     """
     return compute_protein_stats()
 
@@ -841,86 +845,303 @@ def get_global_protein_stats():
 # ==============================
 # Statistiques globales (CSV)
 # ==============================
-with st.expander("📈 Statistiques globales (nodes.csv / edges.csv)", expanded=False):
-    try:
-        stats = get_global_protein_stats()
+st.header("📈 Statistiques globales")
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total de protéines", stats["total_proteins"])
-        with col2:
-            st.metric("Labellisées (EC)", stats["labelled_proteins"])
-            st.metric(
-                "Ratio labellées (%)",
-                f"{stats['labelled_ratio']:.1f}"
+# Bouton pour calculer de nouvelles statistiques
+if st.button("Calculer les statistiques actuelles", type="primary"):
+    with st.spinner("Calcul des statistiques en cours..."):
+        try:
+            stats = get_fresh_protein_stats()
+            timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            
+            # Ajouter au début de l'historique (plus récent en premier)
+            st.session_state.stats_history.insert(0, {
+                "timestamp": timestamp,
+                "stats": stats
+            })
+            
+            st.success(f"✅ Statistiques calculées avec succès à {timestamp}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Erreur lors du calcul : {e}")
+
+# Afficher l'historique des statistiques
+if st.session_state.stats_history:
+    st.markdown(f"**{len(st.session_state.stats_history)} snapshot(s) de statistiques enregistré(s)**")
+    st.markdown("---")
+    
+    for idx, snapshot in enumerate(st.session_state.stats_history):
+        timestamp = snapshot["timestamp"]
+        stats = snapshot["stats"]
+        
+        # Première entrée ouverte par défaut, les autres fermées
+        is_expanded = (idx == 0)
+        
+        with st.expander(f"📊 Statistiques du {timestamp}", expanded=is_expanded):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total de protéines", stats["total_proteins"])
+            with col2:
+                st.metric("Labellisées (EC)", stats["labelled_proteins"])
+                st.metric(
+                    "Ratio labellisées (%)",
+                    f"{stats['labelled_ratio']:.1f}"
+                )
+            with col3:
+                st.metric("Isolées", stats["isolated_proteins"])
+                st.metric(
+                    "Ratio isolées (%)",
+                    f"{stats['isolated_ratio']:.1f}"
+                )
+
+            st.markdown("### Répartitions")
+
+            # ========= Camembert 1 : Labellisées vs non labellisées =========
+            labels_1 = ["Labellisées", "Non labellisées"]
+            values_1 = [
+                stats["labelled_proteins"],
+                stats["unlabelled_proteins"],
+            ]
+
+            fig1 = px.pie(
+                names=labels_1,
+                values=values_1,
+                hole=0.3,
+                title="Labellisées vs non labellisées",
             )
-        with col3:
-            st.metric("Isolées", stats["isolated_proteins"])
-            st.metric(
-                "Ratio isolées (%)",
-                f"{stats['isolated_ratio']:.1f}"
+            fig1.update_traces(
+                textposition="inside",
+                textinfo="percent+label"
+            )
+            fig1.update_layout(
+                margin=dict(t=40, b=10, l=10, r=10),
+                showlegend=False,
             )
 
-        st.markdown("### Répartitions")
+            non_isolated = stats["total_proteins"] - stats["isolated_proteins"]
+            labels_2 = ["Isolées", "Non isolées"]
+            values_2 = [
+                stats["isolated_proteins"],
+                non_isolated,
+            ]
 
-        # ========= Camembert 1 : Labellisées vs non labellisées =========
-        labels_1 = ["Labellisées", "Non labellisées"]
-        values_1 = [
-            stats["labelled_proteins"],
-            stats["unlabelled_proteins"],
-        ]
+            fig2 = px.pie(
+                names=labels_2,
+                values=values_2,
+                hole=0.3,
+                title="Isolées vs non isolées",
+            )
+            fig2.update_traces(
+                textposition="inside",
+                textinfo="percent+label"
+            )
+            fig2.update_layout(
+                margin=dict(t=40, b=10, l=10, r=10),
+                showlegend=False,
+            )
 
-        fig1 = px.pie(
-            names=labels_1,
-            values=values_1,
-            hole=0.3,
-            title="Labellisées vs non labellisées",
-        )
-        fig1.update_traces(
-            textposition="inside",
-            textinfo="percent+label"
-        )
-        fig1.update_layout(
-            margin=dict(t=40, b=10, l=10, r=10),
-            showlegend=False,
-        )
+            # Affichage côte à côte
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(fig1, use_container_width=True, key=f"pie1_{timestamp}_{idx}")
+            with c2:
+                st.plotly_chart(fig2, use_container_width=True, key=f"pie2_{timestamp}_{idx}")
+            
+            # Afficher les différences avec le snapshot précédent
+            if idx < len(st.session_state.stats_history) - 1:
+                st.markdown("---")
+                st.markdown("### 📈 Évolution depuis le snapshot précédent")
+                
+                prev_stats = st.session_state.stats_history[idx + 1]["stats"]
+                prev_timestamp = st.session_state.stats_history[idx + 1]["timestamp"]
+                
+                delta_col1, delta_col2, delta_col3 = st.columns(3)
+                with delta_col1:
+                    delta_total = stats["total_proteins"] - prev_stats["total_proteins"]
+                    st.metric(
+                        "Δ Total protéines",
+                        stats["total_proteins"],
+                        delta=delta_total,
+                        delta_color="normal"
+                    )
+                
+                with delta_col2:
+                    delta_labelled = stats["labelled_proteins"] - prev_stats["labelled_proteins"]
+                    st.metric(
+                        "Δ Labellisées",
+                        stats["labelled_proteins"],
+                        delta=delta_labelled,
+                        delta_color="normal"
+                    )
+                
+                with delta_col3:
+                    delta_isolated = stats["isolated_proteins"] - prev_stats["isolated_proteins"]
+                    st.metric(
+                        "Δ Isolées",
+                        stats["isolated_proteins"],
+                        delta=delta_isolated,
+                        delta_color="inverse"
+                    )
+                
+                st.caption(f"Comparaison avec le snapshot du {prev_timestamp}")
+else:
+    st.info("ℹ️ Aucune statistique calculée pour le moment. Cliquez sur le bouton ci-dessus pour générer un snapshot.")
 
-        non_isolated = stats["total_proteins"] - stats["isolated_proteins"]
-        labels_2 = ["Isolées", "Non isolées"]
-        values_2 = [
-            stats["isolated_proteins"],
-            non_isolated,
-        ]
+st.markdown("---")
 
-        fig2 = px.pie(
-            names=labels_2,
-            values=values_2,
-            hole=0.3,
-            title="Isolées vs non isolées",
-        )
-        fig2.update_traces(
-            textposition="inside",
-            textinfo="percent+label"
-        )
-        fig2.update_layout(
-            margin=dict(t=40, b=10, l=10, r=10),
-            showlegend=False,
-        )
+# ===========================================
+# SECTION LABEL PROPAGATION
+# ===========================================
 
-        # Affichage côte à côte
-        c1, c2 = st.columns(2)
-        with c1:
-            st.plotly_chart(fig1, use_container_width=True)
-        with c2:
-            st.plotly_chart(fig2, use_container_width=True)
+st.header('🏷️ Label Propagation')
+st.markdown("""
+Cette section permet de prédire les numéros EC manquants pour les protéines non annotées 
+en utilisant un algorithme de propagation de labels basé sur la similarité des domaines InterPro.
+""")
 
-    except Exception as e:
-        st.error(f"Erreur lors du calcul des statistiques globales : {e}")
+# Import des fonctions de label propagation
+try:
+    from label_propagation2 import run_validation_for_frontend, run_prediction_for_frontend
+    LABEL_PROP_AVAILABLE = True
+except ImportError as e:
+    LABEL_PROP_AVAILABLE = False
+    st.error(f"❌ Module label_propagation2 non disponible: {e}")
+
+if LABEL_PROP_AVAILABLE:
+    # États pour la propagation
+    if 'validation_results' not in st.session_state:
+        st.session_state.validation_results = None
+    if 'prediction_results' not in st.session_state:
+        st.session_state.prediction_results = None
+    if 'propagation_running' not in st.session_state:
+        st.session_state.propagation_running = False
+
+    # --- Section 1: Validation du modèle ---
+    st.subheader("📊 Évaluation du modèle")
+    
+    with st.expander("ℹ️ Comment fonctionne la validation ?", expanded=False):
+        st.markdown("""
+        **Processus de validation :**
+        1. Les protéines avec EC connus sont divisées aléatoirement en ensembles **train** et **test**
+        2. L'algorithme prédit les EC des protéines test en se basant sur leurs voisins train
+        3. Les prédictions sont comparées aux vraies valeurs pour calculer les métriques
+        4. Ce processus est répété plusieurs fois pour obtenir des moyennes fiables
+        
+        **Métriques :**
+        - **Précision** : Parmi les EC prédits, combien sont corrects ?
+        - **Rappel** : Parmi les vrais EC, combien ont été prédits ?
+        - **F1-Score** : Moyenne harmonique de la précision et du rappel
+        """)
+    
+    col_val1, col_val2 = st.columns([1, 2])
+    
+    with col_val1:
+        n_repeats = st.slider("Nombre d'itérations", min_value=1, max_value=10, value=5, 
+                              help="Plus d'itérations = résultats plus fiables mais plus lent")
+        test_ratio = st.slider("Ratio de test", min_value=0.1, max_value=0.4, value=0.2, step=0.05,
+                               help="Proportion de protéines utilisées pour le test")
+        
+        if st.button("🚀 Lancer la validation", type="primary", disabled=st.session_state.propagation_running):
+            st.session_state.propagation_running = True
+            with st.spinner(f"Validation en cours ({n_repeats} itérations)..."):
+                try:
+                    results = run_validation_for_frontend(n_repeats=n_repeats, test_ratio=test_ratio)
+                    st.session_state.validation_results = results
+                    st.success("✅ Validation terminée !")
+                except Exception as e:
+                    st.error(f"❌ Erreur: {e}")
+            st.session_state.propagation_running = False
+            st.rerun()
+    
+    with col_val2:
+        if st.session_state.validation_results:
+            results = st.session_state.validation_results
+            
+            # Métriques globales
+            st.markdown("#### Métriques globales")
+            met_col1, met_col2, met_col3 = st.columns(3)
+            with met_col1:
+                st.metric("Précision", f"{results['global_metrics']['precision']*100:.1f}%")
+            with met_col2:
+                st.metric("Rappel", f"{results['global_metrics']['recall']*100:.1f}%")
+            with met_col3:
+                st.metric("F1-Score", f"{results['global_metrics']['f1']*100:.1f}%")
+            
+            st.caption(f"Moyennes sur {results['n_repeats']} itérations (ratio test: {results['test_ratio']*100:.0f}%)")
+            
+            # Graphique des métriques par niveau EC
+            st.markdown("#### Métriques par niveau EC")
+            
+            import plotly.graph_objects as go
+            
+            levels = [1, 2, 3, 4]
+            precision_vals = [results['level_metrics'][l]['precision']*100 for l in levels]
+            recall_vals = [results['level_metrics'][l]['recall']*100 for l in levels]
+            f1_vals = [results['level_metrics'][l]['f1']*100 for l in levels]
+            
+            fig = go.Figure(data=[
+                go.Bar(name='Précision', x=[f"Niveau {l}" for l in levels], y=precision_vals, marker_color='#636EFA'),
+                go.Bar(name='Rappel', x=[f"Niveau {l}" for l in levels], y=recall_vals, marker_color='#EF553B'),
+                go.Bar(name='F1-Score', x=[f"Niveau {l}" for l in levels], y=f1_vals, marker_color='#00CC96'),
+            ])
+            fig.update_layout(
+                barmode='group',
+                yaxis_title='Score (%)',
+                height=300,
+                margin=dict(t=20, b=20, l=40, r=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Cliquez sur 'Lancer la validation' pour évaluer les performances du modèle.")
+
+    st.markdown("---")
+
+    # --- Section 2: Prédiction et mise à jour ---
+    st.subheader("🔮 Prédiction des EC manquants")
+    
+    st.warning("""
+    ⚠️ **Attention** : Cette action va modifier les bases de données !  
+    Les protéines sans numéro EC recevront un EC prédit basé sur leurs voisins.
+    """)
+    
+    col_pred1, col_pred2 = st.columns([1, 2])
+    
+    with col_pred1:
+        if st.button("Lancer la prédiction", type="secondary", disabled=st.session_state.propagation_running):
+            st.session_state.propagation_running = True
+            with st.spinner("Prédiction et mise à jour en cours..."):
+                try:
+                    results = run_prediction_for_frontend(min_weight_threshold=0.0)
+                    st.session_state.prediction_results = results
+                    st.success("✅ Prédiction terminée !")
+                except Exception as e:
+                    st.error(f"❌ Erreur: {e}")
+            st.session_state.propagation_running = False
+            st.rerun()
+    
+    with col_pred2:
+        if st.session_state.prediction_results:
+            results = st.session_state.prediction_results
+            
+            # Résumé des mises à jour
+            st.markdown(f"### {results['total_updated_neo4j']} protéines mises à jour")
+            
+            # Exemples de prédictions
+            if results['examples']:
+                st.markdown("#### Exemples de prédictions")
+                examples_df_data = [
+                    {"Entry": ex["entry"], "EC prédit": ex["ec_numbers"][0] if ex["ec_numbers"] else "-"}
+                    for ex in results['examples'][:10]
+                ]
+                st.dataframe(examples_df_data, use_container_width=True, hide_index=True)
+        else:
+            st.info("Cliquez sur 'Lancer la prédiction' pour attribuer des EC aux protéines non annotées.")
 
 
 # Footer
 st.markdown("---")
 st.markdown(
-    "<p style='text-align: center; color: gray;'>🧬 Protein Database Explorer | Powered by Streamlit & MongoDB</p>",
+    "<p style='text-align: center; color: gray;'>🧬 Protein Database Explorer | Powered by Streamlit & MongoDB & Neo4j</p>",
     unsafe_allow_html=True
 )

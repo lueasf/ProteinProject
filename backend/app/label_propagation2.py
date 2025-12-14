@@ -518,13 +518,7 @@ def show_test_examples(session, predictions_detail, k: int = 5):
 def run_validation_for_frontend(n_repeats: int = 5, test_ratio: float = 0.2):
     """
     Exécute la validation répétée et retourne les résultats pour le frontend.
-    
-    Returns:
-        dict avec:
-            - global_metrics: {"precision": float, "recall": float, "f1": float}
-            - level_metrics: {1: {...}, 2: {...}, 3: {...}, 4: {...}}
-            - n_repeats: int
-            - test_ratio: float
+    Inclut désormais des exemples détaillés de la dernière itération.
     """
     with driver.session(database=database_name) as session:
         scores = {"precision": [], "recall": [], "f1": []}
@@ -534,16 +528,45 @@ def run_validation_for_frontend(n_repeats: int = 5, test_ratio: float = 0.2):
             3: {"precision": [], "recall": [], "f1": []},
             4: {"precision": [], "recall": [], "f1": []}
         }
+        
+        # Pour stocker les détails de la dernière itération
+        last_iteration_details = []
 
         for i in range(n_repeats):
             test_count = setup_train_test_split(session, test_ratio=test_ratio)
             if test_count == 0:
                 continue
 
-            y_pred, y_true, _ = propagate_labels(session, score_threshold=0.1)
+            # On récupère predictions_detail ici
+            y_pred, y_true, predictions_detail = propagate_labels(session, score_threshold=0.1)
 
             if not y_pred:
                 continue
+
+            # Stocker les détails pour la dernière itération seulement (pour affichage frontend)
+            # On doit réassocier entry -> true_labels car predictions_detail ne contient que les preds
+            if i == n_repeats - 1:
+                # Récupération des vrais labels pour les entrées prédites
+                entries_list = list(predictions_detail.keys())
+                # On le fait en batch ou on suppose que l'ordre de y_true correspond à l'ordre d'insertion ?
+                # Le plus sûr est de refaire une petite passe ou de modifier propagate_labels pour renvoyer un dict structuré.
+                # Pour faire simple sans casser propagate_labels, on refait une petite query pour ces entrées :
+                query_details = """
+                MATCH (p:Protein)
+                WHERE p.entry IN $entries
+                RETURN p.entry AS entry, p.ec_numbers AS true_ec
+                """
+                res = session.run(query_details, entries=entries_list[:10]) # On ne garde que 10 exemples
+                
+                for record in res:
+                    entry = record["entry"]
+                    true_ec = record["true_ec"] if record["true_ec"] else []
+                    preds = predictions_detail.get(entry, [])
+                    last_iteration_details.append({
+                        "entry": entry,
+                        "true_ec": true_ec,
+                        "predictions": preds # liste de {ec, score}
+                    })
 
             # Métriques globales
             fold_metrics = evaluate_metrics(y_pred, y_true)
@@ -558,7 +581,7 @@ def run_validation_for_frontend(n_repeats: int = 5, test_ratio: float = 0.2):
                 level_scores[level]["recall"].append(m["recall"])
                 level_scores[level]["f1"].append(m["f1"])
 
-        # Calculer les moyennes
+        # Moyennes
         global_metrics = {
             "precision": float(np.mean(scores["precision"])) if scores["precision"] else 0.0,
             "recall": float(np.mean(scores["recall"])) if scores["recall"] else 0.0,
@@ -578,6 +601,7 @@ def run_validation_for_frontend(n_repeats: int = 5, test_ratio: float = 0.2):
             "level_metrics": level_metrics,
             "n_repeats": n_repeats,
             "test_ratio": test_ratio,
+            "detailed_examples": last_iteration_details # AJOUT ICI
         }
 
 

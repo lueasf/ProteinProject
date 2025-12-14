@@ -50,7 +50,13 @@ scikit-learn
 #### a) MongoDB
 1. Installer MongoDB
 2. Démarrer le service MongoDB
-3. Créer un fichier `.env` à la racine du projet axé sur le .env.example
+
+#### b) Neo4j
+1. Télécharger Neo4j Desktop
+2. Créer une nouvelle base de données
+3. Noter les identifiants de connexion
+
+### c) Créer un fichier `.env` à la racine du projet axé sur le .env.example
 
 ```env
 # MongoDB
@@ -65,16 +71,11 @@ NEO4J_PASSWORD=votre_mot_de_passe
 NEO4J_DATABASE_NAME=project
 ```
 
-#### b) Neo4j
-1. Télécharger Neo4j Desktop
-2. Créer une nouvelle base de données
-3. Noter les identifiants de connexion
-
 ### 3. Préparation des données 
 
 #### b) Chargement des données initiales
-1. Placer votre fichier `uniprot.tsv` dans `backend/data/
-2. Exécuter le script de construction du graphe :
+1. Placer votre fichier `uniprot.tsv` dans `backend/data/raw/`
+2. Exécuter les scripts de remplissage des bases de données :
 
 ```bash
 python backend/app/graph_builder.py
@@ -83,7 +84,7 @@ python backend/app/mongo_builder.py
 ```
 
 ```bash
-streamlit run front.py
+streamlit run frontend/app/pages/front.py
 ```
 L'application sera accessible à l'adresse : http://localhost:8501
 
@@ -138,13 +139,17 @@ backend/app/
 ├── stats.py                # Statistiques
 └── mongo_reset.py          # Réinitialisation
 
-## problèmes courants
+## Problèmes courants
 
-# Vérifier que MongoDB tourne
+### Vérifier que MongoDB est en route
+```
 sudo systemctl status mongod
+```
 
-# Tester la connexion
+### Tester la connexion
+```
 python -c "from pymongo import MongoClient; client = MongoClient('mongodb://localhost:27017'); print(client.server_info())"
+```
 
 
 ## 📊 Structure des données
@@ -178,7 +183,7 @@ python -c "from pymongo import MongoClient; client = MongoClient('mongodb://loca
     "interpro": ["IPR001349", "IPR002327"]
   }
 }
-
+```
 
 ## Setup MongoDB
 ### Sur Linux
@@ -202,5 +207,15 @@ mongosh
 Attention : supprimez le dossier mongobin si vous voulez réinitialiser la base de données. 
 
 
+## Construction du graphe de similarité
+- **Extraction CSV** : [backend/app/graph_builder.py](backend/app/graph_builder.py) lit le fichier TSV brut, nettoie les colonnes (InterPro, EC) et exporte deux jeux de données :
+  - `backend/data/processed/nodes.csv` : chaque protéine, sa liste d’InterPro, ses numéros EC normalisés et les labels hiérarchiques générés.
+  - `backend/data/processed/edges.csv` : toutes les paires de protéines partageant au moins un domaine InterPro, pondérées par le score Jaccard.
+- **Import Neo4j** : [backend/app/neo4j_graph_builder.py](backend/app/neo4j_graph_builder.py) vide la base, crée les index et charge les CSV en batch. Les nœuds reçoivent les attributs biologiques et les listes hiérarchiques `ec_hierarchy_labels`, les arêtes `:SIMILAR` stockent le poids de similarité.
+- **Synchronisation MongoDB** : [backend/app/mongo_builder.py](backend/app/mongo_builder.py) consomme `nodes.csv` pour alimenter la collection MongoDB, en cohérence avec Neo4j.
+
 ## Algorithme de label propagation
-Le script lit un fichier de protéines contenant leurs domaines InterPro et leurs numéros EC, puis construit automatiquement un graphe où chaque protéine est un nœud relié aux autres selon la similarité Jaccard-IDF de leurs ensembles de domaines. À partir de ce graphe, il identifie les protéines annotées par un EC, encode ces labels sous forme one-hot, puis masque aléatoirement une partie de ces annotations pour créer un ensemble de test. L’algorithme de **Label Propagation** est ensuite appliqué : les labels connus (EC) sont fixés sur les nœuds “annotés”, et les probabilités de labels se diffusent dans le graphe via une normalisation symétrique de la matrice d’adjacence, jusqu’à convergence. Le script compare alors, pour les protéines dont l’EC a été masqué, la prédiction obtenue par propagation à la vérité initiale, calculant une accuracy stricte et une top-3 accuracy. Enfin, il affiche plusieurs exemples concrets de prédictions (EC vrai, EC prédit, probabilité), fournissant une évaluation qualitative du modèle sur les données.
+- **Préparation** : la base Neo4j contient `ec_numbers` (labels explicites) et `ec_hierarchy_labels` (tous les niveaux intermédiaires). Un split aléatoire marque une fraction des protéines annotées comme jeu de test, le reste reste en train.
+- **Propagation hiérarchique pondérée** : pour chaque nœud de test, [backend/app/label_propagation2.py](backend/app/label_propagation2.py) agrège les labels hiérarchiques des voisins d’entraînement via les arêtes `:SIMILAR`. Les poids des arêtes s’accumulent par code EC ; ils peuvent être normalisés et filtrés par seuil.
+- **Prise de décision** : les scores hiérarchiques sont ordonnés, puis convertis en prédictions multi-label (au niveau hiérarchique complet ou partiel) selon un seuil configurable.
+- **Évaluation** : scikit-learn calcule précision, rappel et F1 micro, ainsi que les mêmes métriques par profondeur EC (1 à 4). Les répétitions de splits fournissent des intervalles de performance et des exemples de prédictions sont journalisés pour inspection.

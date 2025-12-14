@@ -4,28 +4,41 @@ import pandas as pd
 from collections import defaultdict
 
 def expand_ec(ec_list):
+    """
+    Génère la hiérarchie EC.
+    ec_list est supposée propre (sans espaces inutiles).
+    """
     expanded = set()
     for ec in ec_list:
         if not ec:
             continue
-        parts = ec.split('.')  # ex: ['1', '1', '1', '1']
-        current = ""
-        for i, part in enumerate(parts):
-            if part == '-':
+        
+        parts = ec.split('.')
+        current_parts = []
+        
+        for part in parts:
+            # On ignore les tirets ou les parties vides
+            if part == '-' or not part:
                 continue
-            current += part
-            expanded.add(current)  # '1', puis '1.1', etc.
-            if i < len(parts) - 1:
-                current += "."
+            
+            current_parts.append(part)
+            # Reconstruit "3", puis "3.1", puis "3.1.3"...
+            expanded.add(".".join(current_parts))
+            
     return list(expanded)
 
 def build_protein_graph(tsv_file, nodes_file="backend/data/processed/nodes.csv", edges_file="backend/data/processed/edges.csv"):
+    print("Chargement du fichier TSV...")
     df = pd.read_csv(tsv_file, sep="\t", dtype=str)
     df = df.fillna("")
+    
+    # --- 1. Traitement des InterPro (Construction du graphe) ---
     df['InterPro_list'] = df['InterPro'].apply(lambda x: [d for d in x.split(";") if d] if x else [])
     df.drop(columns=['InterPro'], inplace=True)
+    
     df_with_domains = df[df['InterPro_list'].map(len) > 0].copy()
 
+    print("Construction des arêtes basées sur les domaines...")
     domain_to_proteins = defaultdict(set)
     for idx, row in df_with_domains.iterrows():
         entry = row['Entry']
@@ -48,17 +61,23 @@ def build_protein_graph(tsv_file, nodes_file="backend/data/processed/nodes.csv",
     final_edges = []
     for (p1, p2), shared_count in edges.items():
         union_count = interpro_counts[p1] + interpro_counts[p2] - shared_count
-        weight = shared_count / union_count
-        final_edges.append((p1, p2, weight))
+        if union_count > 0:
+            weight = shared_count / union_count
+            final_edges.append((p1, p2, weight))
 
     edges_df = pd.DataFrame(final_edges, columns=["Source", "Target", "Weight"])
     edges_df.to_csv(edges_file, index=False)
     print(f"{len(edges_df)} arêtes exportées dans {edges_file}")
 
-    # Colonne actuelle (inchangée)
-    df['EC_numbers'] = df['EC number'].apply(lambda x: x.split(";") if x else [])
+    # --- 2. Traitement des EC Numbers (Nettoyage et Hiérarchie) ---
+    
+    # CORRECTION ICI : on ajoute .strip() pour enlever les espaces
+    # Ex: "1.1.1.1; 2.1.1.1" devient ['1.1.1.1', '2.1.1.1'] et non ['1.1.1.1', ' 2.1.1.1']
+    df['EC_numbers'] = df['EC number'].apply(
+        lambda x: [ec.strip() for ec in x.split(";") if ec.strip()] if x else []
+    )
 
-    # Nouvelle colonne enrichie hiérarchique
+    # Maintenant que l'entrée est propre, expand_ec ne générera plus de doublons liés aux espaces
     df['EC_hierarchy_labels'] = df['EC_numbers'].apply(expand_ec)
 
     df.to_csv(nodes_file, index=False)

@@ -271,28 +271,35 @@ st.markdown("---")
 # ===========================================
 st.sidebar.header("🔍 Filtres de Recherche")
 
-# 1. Recherche par mot-clé (filtre classique)
+# 1. Recherche par id
+idsearch = st.sidebar.text_input(
+    "Identifiant",
+    placeholder="Ex: E7ERA6",
+    help="Recherche de protéines contenant cet identifiant"
+)
+
+# 2. Recherche par mot-clé (filtre classique)
 keyword = st.sidebar.text_input(
     "Mot-clé (nom de protéine)", 
     placeholder="Ex: cytochrome, kinase...",
     help="Recherche dans le nom de la protéine et les noms associés"
 )
 
-# 2. Recherche par organisme
+# 3. Recherche par organisme
 organism = st.sidebar.text_input(
     "Organisme",
     placeholder="Ex: Mus musculus, human...",
     help="Filtrer par organisme"
 )
 
-# 3. Recherche par sous-séquence
+# 4. Recherche par sous-séquence
 sequence = st.sidebar.text_input(
     "Sous-séquence",
     placeholder="Ex: MKTAYIAK, GVLFGVF...",
     help="Recherche de protéines contenant cette sous-séquence"
 )
 
-# 4. Numéros EC (Enzyme Commission) - Champs dynamiques
+# 5. Numéros EC (Enzyme Commission) - Champs dynamiques
 st.sidebar.subheader("📊 Annotations EC")
 st.sidebar.caption("Virgule = AND | Nouveaux champs = OR")
 
@@ -412,6 +419,9 @@ def build_filters():
     
     if sequence:
         filters["sequence"] = sequence
+
+    if idsearch:
+        filters["id"] = idsearch
     
     # Construction de l'expression EC
     ec_expression = build_advanced_expression(st.session_state.ec_groups)
@@ -804,6 +814,8 @@ try:
         filter_tags = []
         if filters.get("keyword"):
             filter_tags.append(f"🔤 Mot-clé: `{filters['keyword']}`")
+        if filters.get("id"):
+            filter_tags.append(f"🆔 Identifiant: `{filters['id']}`")
         if filters.get("organism"):
             filter_tags.append(f"🦠 Organisme: `{filters['organism']}`")
         if filters.get("sequence"):

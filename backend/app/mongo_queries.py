@@ -60,7 +60,13 @@ class ProteinDatabase:
         if filters.get("organism"):
             query["organism"] = {"$regex": re.compile(filters["organism"], re.IGNORECASE)}
 
-        # 3. Gestion des Annotations (Logique avancée pour EC et InterPro)
+        # 3. Gestion de la recherche par identifiant (Entry ID)
+        if filters.get("id"):
+            id_pattern = filters["id"].upper().replace(" ", "")
+            # Recherche par préfixe (commence par)
+            query["_id"] = {"$regex": f"^{re.escape(id_pattern)}", "$options": "i"}
+
+        # 4. Gestion des Annotations (Logique avancée pour EC et InterPro)
         # Supporte: valeurs simples, AND, OR, et combinaisons complexes comme "(A AND B) OR (C AND D)"
         annotation_fields = {
             "ec": "annotations.ec_numbers",
@@ -109,7 +115,7 @@ class ProteinDatabase:
                 else:
                     query[mongo_field] = {operator: values}
 
-        # 4. Gestion de la longueur (Range)
+        # 5. Gestion de la longueur (Range)
         length_data = filters.get("length")
         if length_data:
             range_query = {}
@@ -121,7 +127,7 @@ class ProteinDatabase:
             if range_query:
                 query["sequence_length"] = range_query
 
-        # 5. Gestion de la recherche par sous-séquence
+        # 6. Gestion de la recherche par sous-séquence
         if filters.get("sequence"):
             sequence_pattern = filters["sequence"].upper().replace(" ", "")
             query["sequence"] = {"$regex": sequence_pattern, "$options": "i"}

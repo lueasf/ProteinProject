@@ -1151,17 +1151,26 @@ with tab_prod:
     ⚠️ **Attention** : Cette action va écrire dans MongoDB et Neo4j.
     Les protéines sans annotation (`unlabeled`) recevront l'EC de niveau 4 le plus probable.
     """)
-    
+
+    # Ajoute ce sélecteur de stratégie
+    strategies = {
+        "Baseline (Weighted Voting)": "baseline",
+        "Consensus (Fallback)": "consensus",
+        "Cascade (Multi-Run)": "cascade"
+    }
+    strategy_label_prod = st.selectbox("Stratégie de propagation :", list(strategies.keys()), key="strategy_select_prod")
+    strategy_prod = strategies[strategy_label_prod]
+
     if st.button("Lancer la propagation en production", type="secondary", disabled=st.session_state.get('propagation_running', False)):
         st.session_state.propagation_running = True
         with st.spinner("Mise à jour des bases de données..."):
             try:
-                # Appel de la fonction de prédiction réelle
-                prod_results = run_prediction_for_frontend(min_weight_threshold=0.0)
-                st.session_state.prediction_results = prod_results
-                st.success("Mise à jour terminée !")
+                st.session_state.prediction_results = run_prediction_for_frontend(
+                    min_weight_threshold=0.0,
+                    strategy=strategy_prod  # <-- Passe la stratégie choisie
+                )
             except Exception as e:
-                st.error(f"Erreur: {e}")
+                st.error(f"Erreur lors de la propagation : {e}")
         st.session_state.propagation_running = False
         st.rerun()
 
@@ -1169,10 +1178,9 @@ with tab_prod:
         pres = st.session_state.prediction_results
         st.success(f"✅ {pres['total_updated_neo4j']} protéines mises à jour dans Neo4j")
         st.success(f"✅ {pres['total_updated_mongo']} documents mis à jour dans MongoDB")
-        
         if pres['examples']:
-            st.markdown("#### Dernières mises à jour :")
-            st.dataframe(pres['examples'])
+            for ex in pres['examples']:
+                st.write(ex)
 
 # Footer
 st.markdown("---")

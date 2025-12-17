@@ -16,7 +16,7 @@ from delete_protein import delete_protein
 from add_protein import add_protein
 
 from stats import compute_protein_stats  
-from label_propagation2 import run_validation_for_frontend, run_prediction_for_frontend
+from label_propagation_with_hierarchy import run_validation_for_frontend, run_prediction_for_frontend
 
 # --- AJOUT: visualisation de graphe ---
 try:

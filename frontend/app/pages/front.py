@@ -1179,6 +1179,7 @@ with tab_prod:
         st.success(f"✅ {pres['total_updated_neo4j']} protéines mises à jour dans Neo4j")
         st.success(f"✅ {pres['total_updated_mongo']} documents mis à jour dans MongoDB")
         if pres['examples']:
+            st.markdown("#### Exemples de protéines labellisées automatiquement :")
             for ex in pres['examples']:
                 st.write(ex)
 

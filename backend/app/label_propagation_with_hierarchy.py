@@ -179,8 +179,9 @@ def run_cascade_experiment(session, min_weight_threshold: float = 0.0, confidenc
 
     # Boucle 4 -> 1
     for level in [4, 3, 2, 1]:
-        query = f"""
-        MATCH (target:Protein {{subset: 'test'}})
+        # Note les corrections dans la ligne COLLECT ci-dessous : {{ec: ..., score: ...}} sans quotes
+        query = """
+        MATCH (target:Protein {subset: 'test'})
         WHERE NOT target.entry IN $resolved
         MATCH (target)-[r:SIMILAR]-(neighbor:Protein)
         WHERE (neighbor.subset = 'train' OR neighbor.temp_train = true) AND r.weight > $min_weight
@@ -190,11 +191,11 @@ def run_cascade_experiment(session, min_weight_threshold: float = 0.0, confidenc
         WITH target, ec, r WHERE size(split(replace(ec, '-', ''), '.')) >= $level
         WITH target, r, reduce(s = '', i IN range(0, $level-1) | s + (CASE WHEN i>0 THEN '.' ELSE '' END) + split(replace(ec, '-', ''), '.')[i]) as ec_trunc
         WITH target, ec_trunc, sum(r.weight) as score ORDER BY score DESC
-        WITH target, collect({{'ec': ec_trunc, 'score': score}}) as cands, sum(score) as total
+        WITH target, collect({ec: ec_trunc, score: score}) as cands, sum(score) as total
         RETURN target.entry as entry, cands, total
         """
         
-        # --- CORRECTION ICI : Ajout de level=level ---
+        # Ajout du paramètre level=level ici
         result = session.run(query, min_weight=min_weight_threshold, resolved=list(resolved_nodes), level=level)
         
         new_batch = []
@@ -349,7 +350,8 @@ def compute_cascade_prediction_real(session, min_weight: float, conf_thresh: flo
     
     for level in [4, 3, 2, 1]:
         print(f"   ... Level {level}")
-        query = f"""
+        # Note les corrections dans la ligne COLLECT ci-dessous : {{ec: ..., score: ...}} sans quotes
+        query = """
         MATCH (target:Protein)
         WHERE (target.ec_numbers IS NULL OR size(target.ec_numbers)=0) AND target.temp_known IS NULL
         MATCH (target)-[r:SIMILAR]-(neighbor:Protein)
@@ -360,11 +362,11 @@ def compute_cascade_prediction_real(session, min_weight: float, conf_thresh: flo
         WITH target, ec, r WHERE size(split(replace(ec, '-', ''), '.')) >= $level
         WITH target, r, reduce(s='', i IN range(0,$level-1)|s+(CASE WHEN i>0 THEN '.' ELSE '' END)+split(replace(ec,'-',''),'.')[i]) as ec_trunc
         WITH target, ec_trunc, sum(r.weight) as score ORDER BY score DESC
-        WITH target, collect({{ec:ec_trunc, score:score}}) as cands, sum(score) as total
+        WITH target, collect({ec:ec_trunc, score:score}) as cands, sum(score) as total
         RETURN target.entry as entry, cands, total
         """
         
-        # --- CORRECTION ICI : Ajout de level=level ---
+        # Ajout du paramètre level=level ici
         result = session.run(query, mw=min_weight, level=level)
         
         batch = []

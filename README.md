@@ -1,19 +1,16 @@
-# Projet
-
-
 # Protein Database Explorer - Documentation
 
 ## Aperçu du projet
 
-**Protein Database Explorer** est une application web complète permettant de stocker, rechercher, analyser et visualiser des données protéiques à l'aide de bases de données NoSQL (MongoDB et Neo4j). L'application comprend également un système de propagation de labels pour prédire automatiquement les fonctions enzymatiques (numéros EC) des protéines non annotées.
+**Protein Database Explorer** est une application web complète permettant de stocker, rechercher, analyser et visualiser des données protéiques à l'aide de bases de données NoSQL (MongoDB et Neo4j). L'application se distingue par son système de **propagation de labels configurable** permettant de prédire les fonctions enzymatiques (numéros EC) des protéines non annotées selon plusieurs stratégies algorithmiques.
 
 ### Fonctionnalités principales
 - 🔍 **Recherche avancée** dans MongoDB avec auto-complétion en temps réel
-- 📊 **Visualisation interactive** des réseaux de similarité dans Neo4j
-- 🏷️ **Propagation automatique** des annotations EC
-- 📈 **Tableau de bord statistique** avec historiques
+- 📊 **Visualisation interactive** des réseaux de similarité dans Neo4j (zoom, déplacement, physique des nœuds)
+- 🏷️ **Propagation automatique** des annotations EC avec 3 stratégies (Baseline, Consensus, Cascade)
+- 📈 **Tableau de bord statistique** avec historiques et graphiques comparatifs
 - ➕ **CRUD complet** (Ajout/Suppression synchronisée MongoDB/Neo4j)
-- 🧪 **Évaluation du modèle** avec validation répétée
+- 🧪 **Validation du modèle** via Cross-Validation configurable
 
 
 ## Installation et démarrage
@@ -32,7 +29,7 @@ pip install -r requirements.txt
 ```
 
 **requirements.txt** :
-```
+```text
 pandas
 neo4j
 pymongo
@@ -40,6 +37,7 @@ python-dotenv
 tqdm
 streamlit
 streamlit-searchbox
+streamlit-agraph  # Nécessaire pour la visualisation du graphe
 plotly
 numpy
 scikit-learn
@@ -73,20 +71,24 @@ NEO4J_DATABASE_NAME=project
 
 ### 3. Préparation des données 
 
-#### b) Chargement des données initiales
+#### Chargement des données initiales
 1. Placer votre fichier `uniprot.tsv` dans `backend/data/raw/`
 2. Exécuter les scripts de remplissage des bases de données :
 
 ```bash
-python backend/app/graph_builder.py
-python backend/app/neo4j_graph_builder.py
-python backend/app/mongo_builder.py
+python backend/app/graph_builder.py        # Génération des CSV (nodes/edges)
+python backend/app/neo4j_graph_builder.py  # Import Neo4j
+python backend/app/mongo_builder.py        # Import MongoDB
 ```
+
+### 4. Lancement de l'application
 
 ```bash
 streamlit run frontend/app/pages/front.py
 ```
 L'application sera accessible à l'adresse : http://localhost:8501
+
+---
 
 ## Interface principale
 
@@ -94,7 +96,7 @@ L'application sera accessible à l'adresse : http://localhost:8501
 - **Barre de recherche centrale** : Auto-complétion en temps réel  
 - **Filtres avancés** dans la sidebar :
   - Recherche par mot-clé  
-  - Filtres EC (logique AND/OR avancée)  
+  - Filtres EC (logique AND/OR avancée : ajout dynamique de champs)  
   - Filtres InterPro  
   - Longueur de séquence  
   - Organisme  
@@ -102,120 +104,82 @@ L'application sera accessible à l'adresse : http://localhost:8501
 ### 2. Visualisation des graphes
 - Cliquez sur **"Afficher le graphe"** dans un résultat  
 - **Paramètres ajustables** :
-  - `k` : Nombre de voisins directs  
-  - `m` : Nombre de voisins de voisins  
+  - `k` : Nombre de voisins directs (Niveau 1)
+  - `m` : Nombre de voisins de voisins (Niveau 2)
 - **Légende des couleurs** :
-  - 🔴 Rouge : Protéine centrale  
+  - 🔴 Rouge : Protéine centrale (Target)
   - 🔵 Bleu : Voisins directs  
   - 🟢 Vert : Voisins de niveau 2  
+- **Interactivité** : Les nœuds sont cliquables et déplaçables.
 
-### 3. Gestion des données
-- **Ajouter une protéine** : Bouton "Ajouter une protéine"  
-- **Supprimer une protéine** : Bouton dans les détails de la protéine  
-- **Synchronisation automatique** entre MongoDB et Neo4j  
+### 3. Gestion des données (CRUD)
+- **Ajouter une protéine** : Formulaire modal avec validation des champs.
+- **Supprimer une protéine** : Bouton dans les détails de la protéine (avec confirmation).  
+- **Synchronisation** : Toute modification est répercutée instantanément dans MongoDB et Neo4j.
 
 ### 4. Statistiques
-- Accédez aux statistiques globales en bas de page  
-- Calculez des *snapshots* à différents moments  
-- Visualisez l’évolution avec les graphiques  
+- Accédez aux statistiques globales en bas de page.
+- **Snapshots** : Calculez et stockez l'état de la base à un instant T.
+- **Visualisation** : Graphiques camemberts (Pie Charts) pour les ratios Labellisées/Isolées.
 
-### 5. Propagation de labels
-- **Validation** : Évalue les performances du modèle  
-- **Prédiction** : Attribue des EC aux protéines non annotées  
-- **Métriques** : Précision, Rappel, F1-score par niveau EC  
+### 5. Propagation de labels (Onglet dédié)
+L'interface propose 3 onglets pour gérer l'IA :
+1.  **Explications** : Détail des concepts.
+2.  **Validation** : Lancer une Cross-Validation sur le jeu de données actuel pour estimer la précision.
+3.  **Prédiction (Production)** : Appliquer les calculs pour écrire les nouvelles annotations en base.
 
-
-## Backend python
-backend/app/
-├── mongo_queries.py        # Recherche avancée MongoDB
-├── neo4j_query.py          # Requêtes et graphes Neo4j
-├── label_propagation.py    # Algorithme de propagation
-├── label_propagation2.py   # Propagation hiérarchique
-├── graph_builder.py        # Construction du graphe
-├── neo4j_graph_builder.py  # Import dans Neo4j
-├── mongo_builder.py        # Import dans MongoDB
-├── add_protein.py          # CRUD - Ajout
-├── delete_protein.py       # CRUD - Suppression
-├── stats.py                # Statistiques
-└── mongo_reset.py          # Réinitialisation
-
-## Problèmes courants
-
-### Vérifier que MongoDB est en route
-```
-sudo systemctl status mongod
-```
-
-### Tester la connexion
-```
-python -c "from pymongo import MongoClient; client = MongoClient('mongodb://localhost:27017'); print(client.server_info())"
-```
-
-
-## 📊 Structure des données
-
-### Format d'entrée (uniprot.tsv)
-
-| Colonne        | Description                                   |
-|----------------|-----------------------------------------------|
-| Entry          | Identifiant unique (clé primaire)             |
-| Entry Name     | Nom court                                     |
-| Protein names  | Noms complets                                 |
-| Organism       | Espèce source                                 |
-| Sequence       | Séquence d'acides aminés                      |
-| EC number      | Numéro(s) EC (séparés par `;`)                |
-| InterPro       | Domaines InterPro (séparés par `;`)           |
+**Sélecteur de stratégie :**
+- **Baseline (Weighted Voting)** : Vote pondéré standard (rapide).
+- **Consensus (Fallback)** : Tente le niveau 4, se replie sur le niveau 3 si incertain (robuste).
+- **Cascade (Multi-Run)** : Propagation itérative par niveaux successifs (maximise le rappel).
 
 ---
 
-### Modèle MongoDB
+## Structure du Backend
 
-```json
-{
-  "_id": "P12345",
-  "entry_name": "SRD_HUMAN",
-  "protein_names": ["Cytochrome b", "Cyt b"],
-  "organism": "Homo sapiens (Human)",
-  "sequence": "MGDVEKGKKI...",
-  "sequence_length": 156,
-  "annotations": {
-    "ec_numbers": ["1.14.14.1", "4.2.1.152"],
-    "interpro": ["IPR001349", "IPR002327"]
-  }
-}
+```text
+backend/app/
+├── mongo_queries.py                  # Moteur de recherche MongoDB
+├── neo4j_query.py                    # Extraction de sous-graphes pour la viz
+├── label_propagation_with_hierarchy.py # Cœur algorithmique (Baseline, Consensus, Cascade)
+├── graph_builder.py                  # ETL : Parsing TSV -> CSV
+├── neo4j_graph_builder.py            # ETL : Chargement Batch Neo4j
+├── mongo_builder.py                  # ETL : Chargement MongoDB
+├── add_protein.py                    # Logique d'ajout (CRUD)
+├── delete_protein.py                 # Logique de suppression (CRUD)
+├── stats.py                          # Calcul des métriques globales
+└── mongo_reset.py                    # Utilitaires de reset
 ```
 
-## Setup MongoDB
+---
+
+## Algorithme de label propagation
+
+L'algorithme repose sur l'hypothèse que des protéines partageant des domaines fonctionnels (InterPro) ont probablement la même fonction enzymatique (EC).
+
+1.  **Construction du Graphe** : Les arêtes `:SIMILAR` sont pondérées par l'indice de Jaccard sur les domaines InterPro.
+2.  **Stratégies implémentées** :
+    *   **Baseline** : Pour une protéine cible, on additionne les poids des voisins pour chaque label EC. Le label avec le score le plus élevé l'emporte, peu importe son niveau (tous niveaux confondus).
+    *   **Consensus** : Vérifie la confiance du meilleur candidat. Si < seuil, on agrège les scores au niveau hiérarchique supérieur (ex: 1.14.14 -> 1.14) jusqu'à trouver un consensus fiable.
+    *   **Cascade** : Exécute 4 passes. Passe 1 : Prédit uniquement les EC niveau 4 très sûrs. Ces nouvelles prédictions deviennent des sources ("Training set") pour la Passe 2 (niveau 3), etc. Cela permet de propager l'information plus loin dans le graphe.
+
+---
+
+## Setup MongoDB (Mémo)
+
 ### Sur Linux
-
 ```bash
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg –dearmor -o /usr/share/keyrings/mongodb.gpg echo “deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse” | sudo tee /etc/apt/ sources.list.d/mongodb-org-7.0.list sudo apt-get update sudo apt-get install -y mongodb-org
+# Installation (exemple Ubuntu)
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb.gpg
+echo "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+sudo apt-get update
+sudo apt-get install -y mongodb-org
 ```
 
-Dans un terminal
+### Lancement local (sans service)
+Dans un terminal :
 ```bash
 mkdir mongobin
 cd mongobin
 mongod --dbpath .
 ```
-
-Dans un autre terminal
-```bash
-mongosh
-```
-
-Attention : supprimez le dossier mongobin si vous voulez réinitialiser la base de données. 
-
-
-## Construction du graphe de similarité
-- **Extraction CSV** : [backend/app/graph_builder.py](backend/app/graph_builder.py) lit le fichier TSV brut, nettoie les colonnes (InterPro, EC) et exporte deux jeux de données :
-  - `backend/data/processed/nodes.csv` : chaque protéine, sa liste d’InterPro, ses numéros EC normalisés et les labels hiérarchiques générés.
-  - `backend/data/processed/edges.csv` : toutes les paires de protéines partageant au moins un domaine InterPro, pondérées par le score Jaccard.
-- **Import Neo4j** : [backend/app/neo4j_graph_builder.py](backend/app/neo4j_graph_builder.py) vide la base, crée les index et charge les CSV en batch. Les nœuds reçoivent les attributs biologiques et les listes hiérarchiques `ec_hierarchy_labels`, les arêtes `:SIMILAR` stockent le poids de similarité.
-- **Synchronisation MongoDB** : [backend/app/mongo_builder.py](backend/app/mongo_builder.py) consomme `nodes.csv` pour alimenter la collection MongoDB, en cohérence avec Neo4j.
-
-## Algorithme de label propagation
-- **Préparation** : la base Neo4j contient `ec_numbers` (labels explicites) et `ec_hierarchy_labels` (tous les niveaux intermédiaires). Un split aléatoire marque une fraction des protéines annotées comme jeu de test, le reste reste en train.
-- **Propagation hiérarchique pondérée** : pour chaque nœud de test, [backend/app/label_propagation2.py](backend/app/label_propagation2.py) agrège les labels hiérarchiques des voisins d’entraînement via les arêtes `:SIMILAR`. Les poids des arêtes s’accumulent par code EC ; ils peuvent être normalisés et filtrés par seuil.
-- **Prise de décision** : les scores hiérarchiques sont ordonnés, puis convertis en prédictions multi-label (au niveau hiérarchique complet ou partiel) selon un seuil configurable.
-- **Évaluation** : scikit-learn calcule précision, rappel et F1 micro, ainsi que les mêmes métriques par profondeur EC (1 à 4). Les répétitions de splits fournissent des intervalles de performance et des exemples de prédictions sont journalisés pour inspection.

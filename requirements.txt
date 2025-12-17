@@ -8,3 +8,4 @@ streamlit-searchbox
 plotly
 numpy
 scikit-learn
+streamlit-agraph

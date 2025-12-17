@@ -6,6 +6,9 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import precision_score, recall_score, f1_score
+from pymongo import MongoClient
+import dotenv
+from graph_builder import expand_ec
 
 # -------------------------------------------------------------------
 # Connexion Neo4j (mêmes variables d'env que neo4j_graph_builder.py)
@@ -317,8 +320,6 @@ def compute_final_predictions_and_store(
     2. Pour les noeuds SANS EC (unlabeled), agrège les votes depuis les voisins labeled.
     3. Met à jour directement ec_numbers dans Neo4j et MongoDB pour les protéines sans EC.
     """
-    from pymongo import MongoClient
-    import dotenv
     
     dotenv.load_dotenv()
     
@@ -363,7 +364,6 @@ def compute_final_predictions_and_store(
         min_weight=min_weight_threshold,
     )
 
-    # On prépare les mises à jour
     updates = []
 
     for record in result:
@@ -386,9 +386,12 @@ def compute_final_predictions_and_store(
         # Prendre le meilleur EC (score le plus élevé)
         if full_ec_predictions:
             best_ec = full_ec_predictions[0]["ec"]
+            # Générer la hiérarchie EC correspondante
+            ec_hierarchy_labels = expand_ec([best_ec])
             updates.append({
                 "entry": entry,
                 "ec_numbers": [best_ec],
+                "ec_hierarchy_labels": ec_hierarchy_labels,
             })
 
     print(f"   Prédictions calculées pour {len(updates)} nœuds sans EC.")
@@ -404,7 +407,8 @@ def compute_final_predictions_and_store(
             UNWIND $batch AS update
             MATCH (p:Protein {entry: update.entry})
             WHERE p.ec_numbers IS NULL OR size(p.ec_numbers) = 0
-            SET p.ec_numbers = update.ec_numbers
+            SET p.ec_numbers = update.ec_numbers,
+                p.ec_hierarchy_labels = update.ec_hierarchy_labels
             """,
             batch=batch,
         )
@@ -615,8 +619,6 @@ def run_prediction_for_frontend(min_weight_threshold: float = 0.0):
             - total_updated_mongo: int
             - examples: list de {"entry": str, "ec_numbers": list}
     """
-    from pymongo import MongoClient
-    import dotenv
     
     dotenv.load_dotenv()
     

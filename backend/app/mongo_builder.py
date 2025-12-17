@@ -75,4 +75,11 @@ if __name__ == "__main__":
     client = MongoClient(MONGO_URI)
     db = client[DB_NAME]
     collection = db[COLLECTION_NAME]
+
+    # Vider la collection si elle n'est pas vide
+    if collection.count_documents({}) > 0:
+        print("⚠️  La collection existe déjà, suppression de tous les documents...")
+        collection.delete_many({})
+
     collection.insert_many(mongo_docs)
+    print(f"{len(mongo_docs)} documents insérés dans la collection {COLLECTION_NAME}.")

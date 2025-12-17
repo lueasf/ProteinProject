@@ -179,7 +179,7 @@ def run_cascade_experiment(session, min_weight_threshold: float = 0.0, confidenc
 
     # Boucle 4 -> 1
     for level in [4, 3, 2, 1]:
-        query = """
+        query = f"""
         MATCH (target:Protein {{subset: 'test'}})
         WHERE NOT target.entry IN $resolved
         MATCH (target)-[r:SIMILAR]-(neighbor:Protein)
@@ -193,7 +193,9 @@ def run_cascade_experiment(session, min_weight_threshold: float = 0.0, confidenc
         WITH target, collect({{'ec': ec_trunc, 'score': score}}) as cands, sum(score) as total
         RETURN target.entry as entry, cands, total
         """
-        result = session.run(query, min_weight=min_weight_threshold, resolved=list(resolved_nodes))
+        
+        # --- CORRECTION ICI : Ajout de level=level ---
+        result = session.run(query, min_weight=min_weight_threshold, resolved=list(resolved_nodes), level=level)
         
         new_batch = []
         for record in result:
@@ -347,7 +349,7 @@ def compute_cascade_prediction_real(session, min_weight: float, conf_thresh: flo
     
     for level in [4, 3, 2, 1]:
         print(f"   ... Level {level}")
-        query = """
+        query = f"""
         MATCH (target:Protein)
         WHERE (target.ec_numbers IS NULL OR size(target.ec_numbers)=0) AND target.temp_known IS NULL
         MATCH (target)-[r:SIMILAR]-(neighbor:Protein)
@@ -361,7 +363,10 @@ def compute_cascade_prediction_real(session, min_weight: float, conf_thresh: flo
         WITH target, collect({{ec:ec_trunc, score:score}}) as cands, sum(score) as total
         RETURN target.entry as entry, cands, total
         """
-        result = session.run(query, mw=min_weight)
+        
+        # --- CORRECTION ICI : Ajout de level=level ---
+        result = session.run(query, mw=min_weight, level=level)
+        
         batch = []
         for r in result:
             ent = r["entry"]

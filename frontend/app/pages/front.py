@@ -1023,6 +1023,14 @@ tab_expl, tab_val, tab_prod = st.tabs(["ℹ️ Explications", "📊 Validation d
 
 with tab_expl:
     st.markdown("""
+    ### Stratégies de propagation disponibles
+
+    - **Baseline (Weighted Voting)** : Vote pondéré classique sur tous les labels hiérarchiques.
+    - **Consensus (Fallback)** : Tente de prédire le niveau 4, puis descend au niveau 3, etc. si la confiance est insuffisante.
+    - **Cascade (Multi-Run)** : Propagation en plusieurs passes, chaque niveau enrichit le graphe pour le suivant.
+    """)
+
+    st.markdown("""
     ### Comment ça marche ?
     
     L'algorithme utilise la structure de graphe (similitudes entre protéines) pour déduire les annotations manquantes.
@@ -1048,49 +1056,59 @@ with tab_expl:
 
 # --- Section Validation ---
 with tab_val:
-    st.subheader("Validation Croisée (Cross-Validation)")
+    st.subheader("Validation du Modèle (Cross-Validation)")
+
     st.markdown("""
     Pour vérifier la fiabilité, nous masquons artificiellement les EC de certaines protéines (ensemble **Test**) 
     et demandons à l'algorithme de les deviner grâce aux autres (ensemble **Train**).
     """)
-    
+
+    # Sélecteur de stratégie
+    strategies = {
+        "Baseline (Weighted Voting)": "baseline",
+        "Consensus (Fallback)": "consensus",
+        "Cascade (Multi-Run)": "cascade"
+    }
+    strategy_label = st.selectbox("Stratégie de propagation :", list(strategies.keys()), key="strategy_select")
+    strategy = strategies[strategy_label]
+
     col_param, col_action = st.columns([2, 1])
     with col_param:
         n_repeats = st.slider("Nombre d'itérations (Moyenne)", 1, 10, 3)
         test_ratio = st.slider("Taille du Test Set (%)", 10, 40, 20) / 100.0
-    
+
     with col_action:
-        st.write("##") # Spacer
+        st.write("##")  # Spacer
         if st.button("🚀 Lancer la validation", type="primary", disabled=st.session_state.get('propagation_running', False)):
             st.session_state.propagation_running = True
-            with st.spinner(f"Calcul en cours sur {n_repeats} splits aléatoires..."):
+            with st.spinner(f"Calcul en cours ({strategy_label}) sur {n_repeats} splits aléatoires..."):
                 try:
-                    results = run_validation_for_frontend(n_repeats=n_repeats, test_ratio=test_ratio)
-                    st.session_state.validation_results = results
-                    st.success("Validation terminée !")
+                    st.session_state.validation_results = run_validation_for_frontend(
+                        n_repeats=n_repeats,
+                        test_ratio=test_ratio,
+                        strategy=strategy  # <-- Passe la stratégie au backend
+                    )
                 except Exception as e:
-                    st.error(f"Erreur: {e}")
+                    st.error(f"Erreur lors de la validation : {e}")
             st.session_state.propagation_running = False
             st.rerun()
 
     if st.session_state.validation_results:
         res = st.session_state.validation_results
-        
+
         # 1. Métriques Globales
-        st.markdown("### 📈 Performances Globales")
+        st.markdown(f"### 📈 Performances Globales ({strategy_label})")
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Précision Moyenne", f"{res['global_metrics']['precision']*100:.1f}%", help="Combien de prédictions sont correctes ?")
         kpi2.metric("Rappel Moyen", f"{res['global_metrics']['recall']*100:.1f}%", help="Combien de vrais EC ont été trouvés ?")
         kpi3.metric("F1-Score", f"{res['global_metrics']['f1']*100:.1f}%", help="Moyenne harmonique")
 
         st.markdown("#### Détail par niveau hiérarchique EC")
-        
         levels = [1, 2, 3, 4]
-        # On s'assure que les clés existent bien dans res['level_metrics']
         precision_vals = [res['level_metrics'].get(l, {}).get('precision', 0)*100 for l in levels]
         recall_vals = [res['level_metrics'].get(l, {}).get('recall', 0)*100 for l in levels]
         f1_vals = [res['level_metrics'].get(l, {}).get('f1', 0)*100 for l in levels]
-        
+
         fig = go.Figure(data=[
             go.Bar(name='Précision', x=[f"Niveau {l}" for l in levels], y=precision_vals, marker_color='#636EFA'),
             go.Bar(name='Rappel', x=[f"Niveau {l}" for l in levels], y=recall_vals, marker_color='#EF553B'),
@@ -1106,54 +1124,25 @@ with tab_val:
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
-        
-        # 2. Analyse détaillée par exemple
+
+        # 2. Affichage spécifique à la stratégie
+        if strategy == "consensus" and "fallback_stats" in res:
+            st.subheader("Stats de fallback (Consensus)")
+            st.write(res["fallback_stats"])
+        if strategy == "cascade" and "cascade_progression" in res:
+            st.subheader("Progression de la cascade")
+            st.write(res["cascade_progression"])
+
+        # 3. Analyse détaillée par exemple
         st.markdown("### 🔍 Analyse détaillée des prédictions (Test Set)")
         st.caption("Exemples tirés de la dernière itération. Vert = Correct, Rouge = Incorrect.")
 
         detailed_examples = res.get('detailed_examples', [])
-        
         if detailed_examples:
             for example in detailed_examples:
-                entry = example['entry']
-                true_ecs = example['true_ec']
-                preds = example['predictions'] # list of {ec, score}
-                
-                with st.expander(f"Protein {entry} (Vrais EC: {', '.join(true_ecs)})"):
-                    
-                    # Organiser les prédictions par niveau
-                    levels_pred = {1: [], 2: [], 3: [], 4: []}
-                    for p in preds:
-                        lvl = len(p['ec'].split('.'))
-                        if lvl in levels_pred:
-                            levels_pred[lvl].append(p)
-                    
-                    # Affichage en colonnes par niveau
-                    cols = st.columns(4)
-                    for i, lvl in enumerate([1, 2, 3, 4]):
-                        with cols[i]:
-                            st.markdown(f"**Niveau {lvl}**")
-                            # Trier par score et prendre le top 2
-                            top_preds = sorted(levels_pred[lvl], key=lambda x: x['score'], reverse=True)[:2]
-                            
-                            if not top_preds:
-                                st.caption("Aucune prédiction")
-                            
-                            for p in top_preds:
-                                ec_code = p['ec']
-                                score = p['score']
-                                
-                                # Vérification de justesse (Est-ce que le Vrai EC commence par ce code ?)
-                                is_correct = any(real.startswith(ec_code) for real in true_ecs)
-                                color = "green" if is_correct else "red"
-                                icon = "✅" if is_correct else "❌"
-                                
-                                st.markdown(
-                                    f":{color}[{icon} **{ec_code}**] <br> <small>({score:.1%})</small>", 
-                                    unsafe_allow_html=True
-                                )
+                st.write(example)
         else:
-            st.warning("Pas d'exemples détaillés disponibles (vérifiez le backend).")
+            st.info("Aucun exemple détaillé disponible.")
 
 # --- Section Production ---
 with tab_prod:
@@ -1162,17 +1151,26 @@ with tab_prod:
     ⚠️ **Attention** : Cette action va écrire dans MongoDB et Neo4j.
     Les protéines sans annotation (`unlabeled`) recevront l'EC de niveau 4 le plus probable.
     """)
-    
+
+    # Ajoute ce sélecteur de stratégie
+    strategies = {
+        "Baseline (Weighted Voting)": "baseline",
+        "Consensus (Fallback)": "consensus",
+        "Cascade (Multi-Run)": "cascade"
+    }
+    strategy_label_prod = st.selectbox("Stratégie de propagation :", list(strategies.keys()), key="strategy_select_prod")
+    strategy_prod = strategies[strategy_label_prod]
+
     if st.button("Lancer la propagation en production", type="secondary", disabled=st.session_state.get('propagation_running', False)):
         st.session_state.propagation_running = True
         with st.spinner("Mise à jour des bases de données..."):
             try:
-                # Appel de la fonction de prédiction réelle
-                prod_results = run_prediction_for_frontend(min_weight_threshold=0.0)
-                st.session_state.prediction_results = prod_results
-                st.success("Mise à jour terminée !")
+                st.session_state.prediction_results = run_prediction_for_frontend(
+                    min_weight_threshold=0.0,
+                    strategy=strategy_prod  # <-- Passe la stratégie choisie
+                )
             except Exception as e:
-                st.error(f"Erreur: {e}")
+                st.error(f"Erreur lors de la propagation : {e}")
         st.session_state.propagation_running = False
         st.rerun()
 
@@ -1180,10 +1178,10 @@ with tab_prod:
         pres = st.session_state.prediction_results
         st.success(f"✅ {pres['total_updated_neo4j']} protéines mises à jour dans Neo4j")
         st.success(f"✅ {pres['total_updated_mongo']} documents mis à jour dans MongoDB")
-        
         if pres['examples']:
-            st.markdown("#### Dernières mises à jour :")
-            st.dataframe(pres['examples'])
+            st.markdown("#### Exemples de protéines labellisées automatiquement :")
+            for ex in pres['examples']:
+                st.write(ex)
 
 # Footer
 st.markdown("---")

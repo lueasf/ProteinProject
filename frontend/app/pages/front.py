@@ -1023,6 +1023,14 @@ tab_expl, tab_val, tab_prod = st.tabs(["ℹ️ Explications", "📊 Validation d
 
 with tab_expl:
     st.markdown("""
+    ### Stratégies de propagation disponibles
+
+    - **Baseline (Weighted Voting)** : Vote pondéré classique sur tous les labels hiérarchiques.
+    - **Consensus (Fallback)** : Tente de prédire le niveau 4, puis descend au niveau 3, etc. si la confiance est insuffisante.
+    - **Cascade (Multi-Run)** : Propagation en plusieurs passes, chaque niveau enrichit le graphe pour le suivant.
+    """)
+
+    st.markdown("""
     ### Comment ça marche ?
     
     L'algorithme utilise la structure de graphe (similitudes entre protéines) pour déduire les annotations manquantes.
@@ -1132,43 +1140,7 @@ with tab_val:
         detailed_examples = res.get('detailed_examples', [])
         if detailed_examples:
             for example in detailed_examples:
-                entry = example['entry']
-                true_ecs = example['true_ec']
-                preds = example['predictions'] # list of {ec, score}
-                
-                with st.expander(f"Protein {entry} (Vrais EC: {', '.join(true_ecs)})"):
-                    
-                    # Organiser les prédictions par niveau
-                    levels_pred = {1: [], 2: [], 3: [], 4: []}
-                    for p in preds:
-                        lvl = len(p['ec'].split('.'))
-                        if lvl in levels_pred:
-                            levels_pred[lvl].append(p)
-                    
-                    # Affichage en colonnes par niveau
-                    cols = st.columns(4)
-                    for i, lvl in enumerate([1, 2, 3, 4]):
-                        with cols[i]:
-                            st.markdown(f"**Niveau {lvl}**")
-                            # Trier par score et prendre le top 2
-                            top_preds = sorted(levels_pred[lvl], key=lambda x: x['score'], reverse=True)[:2]
-                            
-                            if not top_preds:
-                                st.caption("Aucune prédiction")
-                            
-                            for p in top_preds:
-                                ec_code = p['ec']
-                                score = p['score']
-                                
-                                # Vérification de justesse (Est-ce que le Vrai EC commence par ce code ?)
-                                is_correct = any(real.startswith(ec_code) for real in true_ecs)
-                                color = "green" if is_correct else "red"
-                                icon = "✅" if is_correct else "❌"
-                                
-                                st.markdown(
-                                    f":{color}[{icon} **{ec_code}**] <br> <small>({score:.1%})</small>", 
-                                    unsafe_allow_html=True
-                                )
+                st.write(example)
         else:
             st.info("Aucun exemple détaillé disponible.")
 

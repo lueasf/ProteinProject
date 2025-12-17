@@ -66,7 +66,7 @@ def setup_train_test_split(session, test_ratio: float = 0.2): # Ici on prend par
 
 
 # -------------------------------------------------------------------
-# Propagation hiérarchique basée sur les poids des arêtes
+# 1. Stratégie BASELINE (code du front)
 # -------------------------------------------------------------------
 
 def propagate_labels(session, min_weight_threshold: float = 0.0,
@@ -147,6 +147,222 @@ def propagate_labels(session, min_weight_threshold: float = 0.0,
         y_pred.append(best_predictions)
 
     return y_pred, y_true, predictions_detail
+
+# -------------------------------------------------------------------
+# 2. Nouvelle Stratégie A : CONSENSUS (Fallback)
+# -------------------------------------------------------------------
+
+def propagate_labels_consensus(session, min_weight_threshold: float = 0.0,
+                               confidence_threshold: float = 0.6):
+    """
+    Stratégie 'Intelligente' : Tente de prédire le Niveau 4. 
+    Si le score est trop bas (< confidence_threshold), se replie sur le Niveau 3, etc.
+    """
+    # On utilise la même requête que la baseline pour récupérer les scores bruts
+    # Car Neo4j calcule déjà les sommes de poids pour tous les fragments (1, 1.2, 1.2.3...)
+    query = """
+    MATCH (target:Protein {subset: 'test'})
+    MATCH (target)-[r:SIMILAR]-(neighbor:Protein {subset: 'train'})
+    WHERE r.weight > $min_weight
+    UNWIND neighbor.ec_hierarchy_labels AS ec
+    WITH target, ec, sum(r.weight) AS score
+    ORDER BY score DESC
+    WITH target, collect({ec: ec, score: score}) AS predicted_list
+    RETURN target.entry AS entry, target.ec_hierarchy_labels AS true_labels, predicted_list
+    """
+
+    result = session.run(query, min_weight=min_weight_threshold)
+    y_pred, y_true = [], []
+    
+    # Pour l'analyse
+    fallback_stats = {4: 0, 3: 0, 2: 0, 1: 0, 0: 0} # 0 = échec total
+
+    for record in result:
+        true_labels = record["true_labels"] or []
+        predicted_data = record["predicted_list"] or []
+        
+        if not predicted_data:
+            continue
+
+        # --- LOGIQUE CONSENSUS EN PYTHON ---
+        
+        # 1. Organiser les scores par niveau
+        # On doit renormaliser les scores PAR NIVEAU pour avoir une probabilité
+        # Ex: Somme des scores de tous les EC de niveau 4 = 100%
+        candidates_by_level = defaultdict(list)
+        total_score_by_level = defaultdict(float)
+
+        for item in predicted_data:
+            lvl = get_ec_level(item["ec"])
+            candidates_by_level[lvl].append(item)
+            total_score_by_level[lvl] += item["score"]
+
+        selected_label = None
+        selected_level = 0
+
+        # 2. Tester du niveau 4 jusqu'au niveau 1
+        for level in [4, 3, 2, 1]:
+            candidates = candidates_by_level[level]
+            total = total_score_by_level[level]
+            
+            if not candidates or total == 0:
+                continue
+                
+            # Prendre le meilleur candidat de ce niveau
+            best_candidate = candidates[0] # Ils sont déjà triés par score DESC dans la query
+            
+            # Calculer sa confiance relative (Score du candidat / Somme des scores de ce niveau)
+            confidence = best_candidate["score"] / total
+            
+            if confidence >= confidence_threshold:
+                selected_label = best_candidate["ec"]
+                selected_level = level
+                break # On a trouvé ! On s'arrête là (on ne descend pas plus bas)
+        
+        # Résultat pour cette protéine
+        fallback_stats[selected_level] += 1
+        
+        y_true.append(true_labels)
+        # On renvoie une liste car scikit-learn attend du multilabel, même si ici on n'en a qu'un
+        y_pred.append([selected_label] if selected_label else [])
+
+    print(f"   [Consensus] Stats de décision : {dict(fallback_stats)}")
+    return y_pred, y_true
+
+# -------------------------------------------------------------------
+# 3. Nouvelle Stratégie B : CASCADE (Multi-Run Simulation)
+# -------------------------------------------------------------------
+
+def run_cascade_experiment(session, min_weight_threshold: float = 0.0,
+                           confidence_threshold: float = 0.8):
+    """
+    Simule la propagation en cascade (4 runs).
+    Attention : Modifie temporairement le graphe (propriétés temporaires) puis nettoie.
+    """
+    print("\n🌊 Démarrage de la stratégie CASCADE...")
+    
+    # 1. Reset : On s'assure que seuls les vrais 'train' sont marqués
+    # On va utiliser une propriété 'temp_train' pour simuler l'enrichissement
+    session.run("MATCH (n:Protein) SET n.temp_train = (n.subset = 'train')")
+    session.run("MATCH (n:Protein) REMOVE n.temp_ec_label") # Nettoyage préventif
+
+    total_test_nodes = session.run("MATCH (n:Protein {subset: 'test'}) RETURN count(n) as c").single()['c']
+    
+    if total_test_nodes == 0:
+        print("⚠️ Aucun noeud test trouvé.")
+        return [], []
+
+    resolved_nodes = set()
+    y_pred_final = {} 
+    
+    # Boucle du niveau 4 au niveau 1
+    for level in [4, 3, 2, 1]:
+        print(f"\n   🔄 Run niveau {level} (Seuil confiance: {confidence_threshold})")
+            
+        # Requête : Les noeuds TEST cherchent des voisins parmi (TRAIN + TEMP_TRAIN)
+        # On ne regarde QUE les EC du niveau actuel 'level' chez les voisins
+        query = """
+        MATCH (target:Protein {{subset: 'test'}})
+        WHERE NOT target.entry IN $resolved_entries -- On ne recalcule pas ceux déjà trouvés
+        
+        MATCH (target)-[r:SIMILAR]-(neighbor:Protein)
+        WHERE (neighbor.subset = 'train' OR neighbor.temp_train = true)
+          AND r.weight > $min_weight
+        
+        -- On récupère les labels des voisins
+        -- Si c'est un vrai train, on prend ses hierarchy labels
+        -- Si c'est un temp_train (prédit au tour d'avant), on prend son temp_ec_label
+        WITH target, neighbor, r,
+             CASE 
+                WHEN neighbor.subset = 'train' THEN neighbor.ec_hierarchy_labels 
+                ELSE [neighbor.temp_ec_label] 
+             END as neighbor_labels
+        
+        UNWIND neighbor_labels as ec
+        
+        -- FILTRE : On ne garde que les EC du niveau courant ou plus précis
+        -- (ex: au run 3, on accepte 1.2.3 et 1.2.3.4 qu'on tronquera)
+        WITH target, ec, r
+        WHERE size(split(replace(ec, '-', ''), '.')) >= $level
+        
+        -- TRONCATURE : On ramène tout au niveau courant pour le vote
+        WITH target, r, 
+             reduce(s = '', i IN range(0, $level-1) | 
+                    s + (CASE WHEN i>0 THEN '.' ELSE '' END) + split(replace(ec, '-', ''), '.')[i]) as ec_truncated
+        
+        -- VOTE
+        WITH target, ec_truncated, sum(r.weight) as score
+        ORDER BY score DESC
+        
+        -- AGRÉGATION PAR CIBLE
+        WITH target, collect({{'ec': ec_truncated, 'score': score}}) as candidates, sum(score) as total_level_score
+        
+        RETURN target.entry as entry, candidates, total_level_score
+        """
+        
+        result = session.run(query, min_weight=min_weight_threshold, level=level, resolved_entries=list(resolved_nodes))
+        
+        newly_resolved_batch = []
+        
+        for record in result:
+            entry = record["entry"]
+            candidates = record["candidates"]
+            total_score = record["total_level_score"]
+            
+            if not candidates or total_score == 0: continue
+            
+            best = candidates[0]
+            confidence = best["score"] / total_score
+            
+            if confidence >= confidence_threshold:
+                # VICTOIRE ! On a trouvé un label pour ce niveau
+                label = best["ec"]
+                y_pred_final[entry] = label
+                resolved_nodes.add(entry)
+                newly_resolved_batch.append({'entry': entry, 'label': label})
+        
+        current_coverage = (len(resolved_nodes) / total_test_nodes) * 100
+        print(f"      📊 Progression : {len(newly_resolved_batch)} nouveaux résolus.")
+        print(f"      📈 Couverture totale : {len(resolved_nodes)}/{total_test_nodes} ({current_coverage:.1f}%)")
+
+        # MISE A JOUR DU GRAPHE POUR LE PROCHAIN TOUR
+        # Les nœuds résolus deviennent des sources d'info ("temp_train")
+        if newly_resolved_batch:
+            print(f"      -> {len(newly_resolved_batch)} nouveaux nœuds résolus au niveau {level}.")
+            session.run("""
+            UNWIND $batch as row
+            MATCH (n:Protein {entry: row.entry})
+            SET n.temp_train = true, n.temp_ec_label = row.label
+            """, batch=newly_resolved_batch)
+        else:
+            print("      -> Aucun nouveau nœud résolu à ce niveau.")
+
+    # 3. Récupération finale et Nettoyage
+    session.run("MATCH (n:Protein) REMOVE n.temp_train, n.temp_ec_label")
+    
+    # Construction des y_true / y_pred pour scikit-learn
+    # On doit refaire une passe pour avoir l'ordre et les y_true
+    # (Ou on stocke tout en mémoire, mais faisons une requête simple)
+    entries_ordered = list(y_pred_final.keys())
+    
+    if not entries_ordered:
+        return [], []
+
+    query_truth = """
+    MATCH (n:Protein) WHERE n.entry IN $entries
+    RETURN n.entry as entry, n.ec_hierarchy_labels as true_labels
+    """
+    res = session.run(query_truth, entries=entries_ordered)
+    truth_map = {r['entry']: r['true_labels'] for r in res}
+    
+    y_pred = []
+    y_true = []
+    
+    for entry in entries_ordered:
+        y_pred.append([y_pred_final[entry]])
+        y_true.append(truth_map.get(entry, []))
+        
+    return y_pred, y_true
 
 
 # -------------------------------------------------------------------
